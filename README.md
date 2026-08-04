@@ -5,8 +5,11 @@
 零第三方依赖，`python3` 直接可跑。
 
 ```bash
-python -m unittest discover -s tests -v      # 154 项测试
+python -m unittest discover -s tests -v      # 360 项测试
 ```
+
+**先看这个**：[docs/v4/11-全景总纲.md](docs/v4/11-全景总纲.md) ——
+当前系统的完整状态，每条公式、每个拒绝条件、每个实证数字、每个已抓到的错误。
 
 ---
 
@@ -20,7 +23,7 @@ python -m unittest discover -s tests -v      # 154 项测试
 |---|---|---|
 | **G0 可复现** | `verify_scores` 双跑逐字节一致 | ✅ **已通过** |
 | **G1 有区分度** | ≥5 品类间指标不塌缩成同一档 | ⬜ 需真实数据 |
-| **G2 比瞎猜强** | `BS < UNC` 且样本 ≥30 | ⬜ Outcome 零条 |
+| **G2 比瞎猜强** | `BS < UNC` 且样本 ≥30 | ⬜ 现有 11 条 |
 | **G3 比人省** | 系统 top-10 ≥ 人工 top-10 | ⬜ |
 | **G4 有时间差** | 比公开榜单提前的中位天数 >0 | ⬜ |
 
@@ -38,6 +41,12 @@ python -m unittest discover -s tests -v      # 154 项测试
 | `oic/compliance/` | **证券边界拦截器**（7/7 拦截，7/7 零误杀）、**AI 双标识**、**数据源白名单** |
 | `oic/evidence/` | **span 字符级校验**、时效衰减、双源锚定、**真值发现** |
 | `oic/eval/` | span P/R/F1、Cohen's κ、NDCG@k、CI 门禁 |
+| `oic/research/` | 指标分类学、单位归一、**as-of 时间闸**、**六项确定性纠错**、双队列回测、八角度深度调查、变化率引擎 |
+| `oic/stats/` | **精确置换检验**、Bootstrap CI、运气基线、Benjamini-Hochberg、**PBO** |
+| `oic/sources/` | SEC EDGAR / 巨潮索引、招股书解析、**RSS 适配器**、**合规通用 HTTP 取数器** |
+| `oic/deliver/` | top3 BP、90 天四阶段（带量化止损）、人/钱/平台 |
+| `oic/pipeline/` | 成本硬顶 + 漏斗可行性断言 |
+| `oic/sdk.py` | **嵌入你的 App/智能体**——把纪律一起打包，不只是转发 import |
 | `db/schema.sql` | 12 张表 + 不可变触发器 + RLS |
 
 ### 三条设计纪律，写进了代码
@@ -109,11 +118,13 @@ for line in result.audit:
 ## 自检
 
 ```bash
-python -m unittest discover -s tests -v                # 154 项
+python -m unittest discover -s tests -v                # 360 项
 python -m oic.scoring.kelly --selftest                 # Kelly 三重安全阀
 python -m oic.calibration.report --selftest            # Brier/Murphy/分层/代理
 python -m oic.compliance.securities_guard --selftest   # 100% 拦截 / 0 误杀
 python -m oic.evidence.grounding --selftest            # span 字符级校验
+python -m oic.research.audit --selftest                # 纠错内核（含 100× 单位错回归）
+python -m oic.stats.overfit --selftest                 # 20 特征 × n=8 必须报高 PBO
 python -m oic.eval.run --golden data/golden.seed.jsonl --gate
 ```
 
@@ -131,6 +142,10 @@ python -m oic.eval.run --golden data/golden.seed.jsonl --gate
 | [05 Eval 与门禁](docs/v4/05-Eval与门禁.md) | 三级指标 + CI |
 | [06 合规内核](docs/v4/06-合规内核.md) | 证券边界 / AI 标识 / PIPL |
 | [07 路线图与失效模式](docs/v4/07-路线图与回退规则.md) | Wave 0–5 + **10 条已知失效模式** |
+| [08 操盘手全流程](docs/v4/08-操盘手全流程.md) | 三段式框架落地 |
+| [09 方案融合与缺口](docs/v4/09-方案融合与缺口.md) | 与 Kimi 设计稿的合并结论 |
+| [10 嵌入你的App](docs/v4/10-嵌入你的App.md) | SDK 接入 + 为何没做默认全网爬虫 |
+| **[11 全景总纲](docs/v4/11-全景总纲.md)** | **后端全量：公式/拒绝条件/实证数字/错误清单** |
 
 ---
 
@@ -138,13 +153,14 @@ python -m oic.eval.run --golden data/golden.seed.jsonl --gate
 
 | 阻塞 | 影响 | 解法 |
 |---|---|---|
-| **法务未放行任何数据源** | L1 采集层 6/8 功能 | 把 `source_registry` 送法务 |
-| **单 agent 基线未测量** | L3 分析层 6/7 功能 | Wave 2 测一次 |
-| **Outcome 零条** | L5/L6 共 9 个功能 | 今天开始记，永远补不回来 |
+| **供给侧数据不可得**（覆盖 5/30，扩样本没变） | 剪刀差是最大差异化，现在悬空 | 企查查开放平台报价，或在有网机器上跑招股书管线 |
+| **法务未放行任何数据源** | L1 采集层 | 把 `source_registry` 送法务，逐个 `clear_source()` |
+| **已解析结局 11 < 30** | Kelly / 概率 / G2 全部拒绝输出 | 扩样本到 40+ |
+| **单 agent 基线未测量** | 铁律 2 禁止扩多智能体 | 测一次 |
 
-**下一步就一件事：跑 Wave 0** —— 手工做 2 个品类，同时把数据源登记表送法务。
+供给侧那条**决定产品形态，不是技术问题**。
 
-不要在拿到第一条真实数据之前继续加功能。现在缺的不是能力，是事实。
+不要在这几条之前继续加功能。现在缺的不是算法，是事实。
 
 ---
 
