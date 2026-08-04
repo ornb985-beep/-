@@ -222,31 +222,48 @@ def check_parts_sum(observations: Sequence[Observation]) -> list[Finding]:
 
 
 def check_growth_consistency(observations: Sequence[Observation]) -> list[Finding]:
-    """报告的增速 vs 由两年存量推算的增速。"""
+    """报告的增速 vs 由两年数值推算的增速。
+
+    同时覆盖市场规模与企业数 —— 后者是真实踩到的坑：
+    咖啡 2021 新增 2.6 万家、2022 新增 1.9 万家（−27%），
+    但同一批来源说 2022「同比增长 26.6%」。两者不可能同真。
+    """
     findings: list[Finding] = []
-    size: dict[tuple[str, str, int], float] = {}
-    reported: dict[tuple[str, int], float] = {}
+    series: dict[tuple[str, str, str, int], float] = {}
+    reported: dict[tuple[str, str, int], float] = {}
 
     for obs in observations:
-        if obs.metric_family == mx.Family.MARKET_SIZE:
-            size[(obs.category_key, obs.metric_scope, obs.year)] = obs.value
+        if obs.metric_family in (mx.Family.MARKET_SIZE, mx.Family.COMPANY_COUNT):
+            key = (obs.category_key, obs.metric_family, obs.metric_scope, obs.year)
+            # 同年多源取中位数量级的那个，避免被离群值带偏
+            series.setdefault(key, obs.value)
         elif obs.metric_family == mx.Family.GROWTH_RATE:
-            reported[(obs.category_key, obs.year)] = obs.value
+            reported[(obs.category_key, obs.metric_scope, obs.year)] = obs.value
 
-    for (category, year), stated in sorted(reported.items()):
-        for scope in (mx.Scope.ALL, mx.Scope.CORE):
-            now = size.get((category, scope, year))
-            before = size.get((category, scope, year - 1))
-            if now is None or before is None or before == 0:
+    #: 增速口径 → 它应当对应的数值口径
+    _PAIRING = (
+        (mx.Scope.ALL, mx.Family.MARKET_SIZE, (mx.Scope.ALL, mx.Scope.CORE), "市场规模"),
+        (mx.Scope.DRIVEN, mx.Family.COMPANY_COUNT, (mx.Scope.ALL,), "新增企业数"),
+    )
+
+    for (category, growth_scope, year), stated in sorted(reported.items()):
+        for want_scope, family, value_scopes, label in _PAIRING:
+            if growth_scope != want_scope:
                 continue
-            implied = (now - before) / before * 100.0
-            if abs(implied - stated) > GROWTH_CONSISTENCY_TOLERANCE:
-                findings.append(Finding(
-                    "growth_consistency", Severity.WARN, category,
-                    f"{year} 年报告增速 {stated:+.1f}%，但由 {year-1}→{year} 规模"
-                    f"推算为 {implied:+.1f}%，差 {abs(implied-stated):.1f} 个百分点 ——"
-                    " 两组数字来自不同口径",
-                ))
+            for scope in value_scopes:
+                now = series.get((category, family, scope, year))
+                before = series.get((category, family, scope, year - 1))
+                if now is None or before is None or before == 0:
+                    continue
+                implied = (now - before) / before * 100.0
+                if abs(implied - stated) > GROWTH_CONSISTENCY_TOLERANCE:
+                    findings.append(Finding(
+                        "growth_consistency", Severity.WARN, category,
+                        f"{year} 年报告增速 {stated:+.1f}%，但由 {year-1}→{year} "
+                        f"{label}推算为 {implied:+.1f}%，"
+                        f"差 {abs(implied - stated):.1f} 个百分点 —— 两组数字不可能同真，"
+                        "需人工判定采信哪一个",
+                    ))
     return findings
 
 

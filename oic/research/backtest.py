@@ -114,7 +114,23 @@ class CategorySignal:
 def extract_signals(
     categories: list[dict], observations: list[Observation]
 ) -> list[CategorySignal]:
-    """从档案里提取回测所需的信号。缺失即标记，不猜测。"""
+    """从档案里提取回测所需的信号。缺失即标记，不猜测。
+
+    **审计结论会阻断下游使用**：某品类若被 ``audit`` 判为增速自洽性冲突
+    （报告的增速与由两年数值推算的对不上），该品类的供给增速一律不采用。
+
+    这一条是刻意的：咖啡 2021 新增 2.6 万家、2022 新增 1.9 万家（−26.9%），
+    但来源说「同比增长 26.6%」。两者不可能同真，而我无法判定谁对。
+    此时挑一个用，就是在挑对结论有利的那个。
+    """
+    from oic.research.audit import audit
+
+    report = audit(observations)
+    disputed_growth = {
+        finding.category_key for finding in report.findings
+        if finding.check == "growth_consistency"
+    }
+
     signals: list[CategorySignal] = []
 
     for category in categories:
@@ -132,10 +148,13 @@ def extract_signals(
             missing.append("需求增速")
         signal.demand_growth = demand
 
-        # 供给增速：企业注册同比，或门店数推算
+        # 供给增速：优先直接观测到的企业注册同比，
+        # 其次由两年新增注册数推算，最后退到门店数推算
         supply = dossier.value(
             mx.MetricKey(mx.Family.GROWTH_RATE, mx.Scope.DRIVEN, mx.Measure.FLOW), 2022
         )
+        if supply is None:
+            supply = dossier.growth_pct(mx.COMPANY_NEW, 2022, 2021)
         if supply is None:
             supply = dossier.growth_pct(
                 mx.MetricKey(mx.Family.STORE_COUNT, mx.Scope.ALL, mx.Measure.STOCK),
@@ -143,7 +162,12 @@ def extract_signals(
             )
             if supply is not None:
                 supply /= 2.0     # 两年跨度折算成年化
-        if supply is None:
+
+        if key in disputed_growth:
+            # 审计判定该品类的增速数据自相矛盾 —— 拒绝采用，不挑一个用
+            supply = None
+            missing.append("供给增速（来源冲突，审计已阻断）")
+        elif supply is None:
             missing.append("供给增速")
         signal.supply_growth = supply
 
@@ -311,11 +335,25 @@ def build_report(signals: list[CategorySignal]) -> list[str]:
     add("")
     try:
         from oic.stats.overfit import expected_max_correlation
+        n_here = max(len(q1b), 3)
+        add(f"| 试几个特征 | 运气的 \\|ρ\\| 中位数 | 95 分位 |")
+        add("|---|---:|---:|")
+        saturated = []
         for k in (1, 5, 20):
-            luck = expected_max_correlation(max(len(q1b), 3), k, n_simulations=1500)
-            add(f"- 试 {k:>2} 个特征：纯运气的 95 分位 |ρ| = **{luck.p95_max_abs_rho:.3f}**")
+            luck = expected_max_correlation(n_here, k, n_simulations=1500)
+            saturated.append(luck.p95_max_abs_rho)
+            add(f"| {k} | {luck.median_max_abs_rho:.3f} | **{luck.p95_max_abs_rho:.3f}** |")
         add("")
-        add("在这个样本量下，**试 20 个特征，纯运气就能刷出 |ρ|≈0.87**。")
+        if max(saturated) - min(saturated) < 1e-9:
+            add(f"**注意 95 分位三档相同**：n={n_here} 时二元标签只有有限种排列，"
+                "相关系数取值离散且很粗，抽一次就常常撞到可能的最大值。")
+            add("")
+            add("**这本身就是结论 —— 样本小到任何相关系数都失去分辨力。**"
+                "中位数一列仍能看出「试得越多、运气越好」的趋势。")
+        else:
+            add(f"在这个样本量下，试 20 个特征，纯运气就能刷出 "
+                f"|ρ|≈{saturated[-1]:.2f}。")
+        add("")
         add("所以「我们又测了剪刀差/切换势能/HHI/成熟度，发现 X 最相关」这类结论，")
         add("在 n 变大之前一律不成立 —— 这正是量化回测过拟合的经典陷阱。")
     except ValueError:
