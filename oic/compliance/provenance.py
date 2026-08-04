@@ -177,6 +177,30 @@ INITIAL_SOURCES: tuple[SourceRecord, ...] = (
         reviewed_on="",
     ),
     SourceRecord(
+        key="sec_edgar",
+        name="美国 SEC EDGAR（S-1 / 10-K 招股书与年报）",
+        access_method=AccessMethod.PUBLIC_DOWNLOAD,
+        tos_url="https://www.sec.gov/os/webmaster-faq#developers",
+        legal_status=LegalStatus.PENDING,
+        legal_note="法定公开披露文件，非爬取。SEC 明文允许程序化访问，"
+                   "但要求 User-Agent 含联系邮箱且 ≤10 请求/秒 —— "
+                   "这是 ToS 硬要求，违反会被封禁。"
+                   "内容为审计过、有法律责任的 A 级数据。",
+        reviewed_on="",
+    ),
+    SourceRecord(
+        key="cninfo",
+        name="巨潮资讯网（A股招股说明书 / 年报，证监会指定披露平台）",
+        access_method=AccessMethod.PUBLIC_DOWNLOAD,
+        tos_url="",
+        legal_status=LegalStatus.PENDING,
+        legal_note="证监会指定的法定信息披露平台，公告为强制公开内容。"
+                   "「行业竞争格局」章节含市占率/CR5/同业企业数 —— "
+                   "正是公开渠道拿不到、而剪刀差必需的供给侧字段。"
+                   "需确认其 robots 与访问频率要求。",
+        reviewed_on="",
+    ),
+    SourceRecord(
         key="youtube_data_api",
         name="YouTube Data API（创作者方法论，转录优先）",
         access_method=AccessMethod.OFFICIAL_API,

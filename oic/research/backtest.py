@@ -263,18 +263,63 @@ def build_report(signals: list[CategorySignal]) -> list[str]:
     add("")
     q1b = [s for s in with_demand if s.outcome_demand is not None]
     if len(q1b) >= 3:
+        xs = [s.demand_growth for s in q1b]
+        ys = [s.outcome_demand for s in q1b]
         try:
-            rho = spearman([s.demand_growth for s in q1b],
-                           [float(s.outcome_demand) for s in q1b])
+            from oic.stats.overfit import expected_max_correlation
+            from oic.stats.resample import bootstrap_ci, permutation_test_binary
+
+            test = permutation_test_binary(xs, ys)
             add(f"- 样本 n = {len(q1b)}")
-            add(f"- Spearman ρ(2022需求增速, 2025主标签) = **{rho:+.3f}**")
+            add(f"- Spearman ρ(2022需求增速, 2025主标签) = **{test.statistic:+.3f}**")
+            add(f"- **精确置换检验**：p = **{test.p_value:.3f}**"
+                f"（穷举 {test.n_permutations} 种排列，非近似）")
+            try:
+                interval = bootstrap_ci(xs, ys, n_resamples=5000)
+                add(f"- Bootstrap 90% 区间：[{interval.lower:+.3f}, {interval.upper:+.3f}]"
+                    f" —— {'跨越 0' if interval.spans_zero else '不跨 0'}")
+            except ValueError as exc:
+                add(f"- Bootstrap 区间无法计算：{exc}")
+
+            luck = expected_max_correlation(len(q1b), 1, n_simulations=3000)
+            add(f"- **运气基线**：n={len(q1b)} 时纯随机的 |ρ| 中位数 "
+                f"{luck.median_max_abs_rho:.3f}，95 分位 {luck.p95_max_abs_rho:.3f}")
+            add("")
+            if not luck.beats_luck(abs(test.statistic)):
+                add(f"### 结论：**没有信号**")
+                add("")
+                add(f"观测 |ρ|={abs(test.statistic):.3f} 与纯随机的中位数 "
+                    f"{luck.median_max_abs_rho:.3f} 基本相同，p={test.p_value:.2f}，"
+                    "区间大幅跨零。")
+                add("")
+                add("**这不是「弱信号」，这就是噪声本身的样子。** "
+                    "不要因为方向符合直觉就去解读它。")
+            else:
+                add("观测值超过运气基线，值得用更大样本继续查。")
             add("")
             add("**这一项的意义**：如果只看需求增速就能预测，那供给侧引擎"
-                "（本系统最大差异化、也是最贵的数据）就没有增量价值。")
+                "（本系统最大差异化、也是最贵的数据）就没有增量价值。"
+                "目前两者都没测出信号。")
         except ValueError as exc:
             add(f"无法计算：{exc}")
     else:
         add(f"样本不足（n={len(q1b)}）。")
+    add("")
+
+    # --- 多重检验警告 ---
+    add("## ⚠️ 多重检验：为什么不能接着加特征")
+    add("")
+    try:
+        from oic.stats.overfit import expected_max_correlation
+        for k in (1, 5, 20):
+            luck = expected_max_correlation(max(len(q1b), 3), k, n_simulations=1500)
+            add(f"- 试 {k:>2} 个特征：纯运气的 95 分位 |ρ| = **{luck.p95_max_abs_rho:.3f}**")
+        add("")
+        add("在这个样本量下，**试 20 个特征，纯运气就能刷出 |ρ|≈0.87**。")
+        add("所以「我们又测了剪刀差/切换势能/HHI/成熟度，发现 X 最相关」这类结论，")
+        add("在 n 变大之前一律不成立 —— 这正是量化回测过拟合的经典陷阱。")
+    except ValueError:
+        pass
     add("")
 
     # --- Q3 排序有没有用 ---

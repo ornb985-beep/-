@@ -26,6 +26,7 @@ class Family:
     """指标大类 —— 量纲不同，绝不可跨类比较。"""
 
     MARKET_SIZE = "market_size"       # 币种金额
+    MARKET_SHARE = "market_share"     # 百分数 —— 份额不是规模，混淆会毁掉集中度计算
     COMPANY_COUNT = "company_count"   # 家数
     GROWTH_RATE = "growth_rate"       # 百分数
     STORE_COUNT = "store_count"       # 门店数
@@ -116,6 +117,11 @@ COMPANY_NEW = MetricKey(Family.COMPANY_COUNT, Scope.ALL, Measure.FLOW)
 
 DEMAND_GROWTH = MetricKey(Family.GROWTH_RATE, Scope.ALL, Measure.FLOW)
 SUPPLY_GROWTH = MetricKey(Family.GROWTH_RATE, Scope.ALL, Measure.FLOW)
+
+#: 单家公司自身份额
+MARKET_SHARE_SELF = MetricKey(Family.MARKET_SHARE, Scope.ALL, Measure.STOCK)
+#: 前五大合计份额（CR5）—— 直接喂给 concentration 引擎
+MARKET_SHARE_CR5 = MetricKey(Family.MARKET_SHARE, Scope.CORE, Measure.STOCK)
 
 
 #: 中文表述 → 口径。用于把检索到的文字标准化。
