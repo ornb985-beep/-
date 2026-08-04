@@ -128,6 +128,134 @@ class Registry:
 # ---------------------------------------------------------------------------
 
 INITIAL_SOURCES: tuple[SourceRecord, ...] = (
+    # -----------------------------------------------------------------
+    # 热榜 / 注意力源
+    #
+    # ⚠️ 这一组全部只测「需求侧注意力」。它们回答不了
+    #    「供给增速是多少」，因此单靠它们算不出剪刀差。
+    #    见 scoring/attention.py 的结构约束。
+    # -----------------------------------------------------------------
+    SourceRecord(
+        key="weibo_hot",
+        name="微博热搜榜",
+        access_method=AccessMethod.SCRAPING,
+        tos_url="https://weibo.com/signup/v5/protocol",
+        legal_status=LegalStatus.NOT_ASSESSED,
+        legal_note="⚠️ 该站有反爬措施。反爬 = 技术管理措施，"
+                   "《反不正当竞争法》(2025) 第13条第3款禁止以避开或破坏"
+                   "技术管理措施的方式获取他人合法持有的数据。"
+                   "**抓取失败不是待修的 bug，是停止信号。**"
+                   "若确需该数据，只能走官方开放平台或商业授权。",
+        reviewed_on="",
+    ),
+    SourceRecord(
+        key="zhihu_hot",
+        name="知乎热榜",
+        access_method=AccessMethod.SCRAPING,
+        tos_url="https://www.zhihu.com/term/zhihu-terms",
+        legal_status=LegalStatus.NOT_ASSESSED,
+        legal_note="同微博：有反爬措施，持续绕过存在法律风险。"
+                   "需改走授权渠道，或从源清单中移除。",
+        reviewed_on="",
+    ),
+    SourceRecord(
+        key="baidu_hot",
+        name="百度热搜",
+        access_method=AccessMethod.SCRAPING,
+        tos_url="",
+        legal_status=LegalStatus.NOT_ASSESSED,
+        legal_note="当前可抓通不等于合规。需确认取数方式："
+                   "若为页面抓取则同样受第13条第3款约束；"
+                   "百度指数有官方开放接口，应优先走那条路。",
+        reviewed_on="",
+    ),
+    SourceRecord(
+        key="toutiao_hot",
+        name="今日头条热榜",
+        access_method=AccessMethod.SCRAPING,
+        tos_url="",
+        legal_status=LegalStatus.NOT_ASSESSED,
+        legal_note="同上：能抓通 ≠ 获授权。需登记实际取数方式与依据。",
+        reviewed_on="",
+    ),
+    SourceRecord(
+        key="douyin_hot",
+        name="抖音热点榜",
+        access_method=AccessMethod.SCRAPING,
+        tos_url="https://www.douyin.com/agreements",
+        legal_status=LegalStatus.NOT_ASSESSED,
+        legal_note="抖音开放平台有官方接口。作为核心赛道（珠宝直播）的主源，"
+                   "尤其应走官方授权 —— 平台依赖本身也是 R1 红线的一类。",
+        reviewed_on="",
+    ),
+    # -----------------------------------------------------------------
+    # RSS —— 发布方主动提供，合规性显著优于抓取
+    # -----------------------------------------------------------------
+    SourceRecord(
+        key="rss_36kr",
+        name="36氪 RSS（创投 / 新品牌 / 融资）",
+        access_method=AccessMethod.PUBLIC_DOWNLOAD,
+        tos_url="",
+        legal_status=LegalStatus.PENDING,
+        legal_note="RSS 由发布方主动提供，是「被邀请读取」而非「绕过措施」，"
+                   "合规位置远好于页面抓取。仍需确认转载与二次分发条款。"
+                   "内容属媒体叙事（B级），**不是供给侧数据**。",
+        reviewed_on="",
+    ),
+    SourceRecord(
+        key="rss_huxiu",
+        name="虎嗅 RSS（商业 / 消费）",
+        access_method=AccessMethod.PUBLIC_DOWNLOAD,
+        tos_url="",
+        legal_status=LegalStatus.PENDING,
+        legal_note="同 36氪。媒体叙事，B级来源。",
+        reviewed_on="",
+    ),
+    SourceRecord(
+        key="rss_iyiou",
+        name="亿欧 RSS（产业 / 科技）",
+        access_method=AccessMethod.PUBLIC_DOWNLOAD,
+        tos_url="",
+        legal_status=LegalStatus.PENDING,
+        legal_note="同 36氪。媒体叙事，B级来源。",
+        reviewed_on="",
+    ),
+    # -----------------------------------------------------------------
+    # 政府 / 法定公开 —— A 级，且部分是稀缺的供给侧数据
+    # -----------------------------------------------------------------
+    SourceRecord(
+        key="stats_gov",
+        name="国家统计局（宏观消费、社零、CPI）",
+        access_method=AccessMethod.PUBLIC_DOWNLOAD,
+        tos_url="http://www.stats.gov.cn/",
+        legal_status=LegalStatus.PENDING,
+        legal_note="法定公开统计数据，A 级。"
+                   "注意：**仍属需求侧**，且颗粒度到行业大类，"
+                   "落不到品类层，不能替代供给侧数据。",
+        reviewed_on="",
+    ),
+    SourceRecord(
+        key="gsxt_gov",
+        name="国家企业信用信息公示系统（注册 / 注销 / 吊销）",
+        access_method=AccessMethod.PUBLIC_DOWNLOAD,
+        tos_url="https://www.gsxt.gov.cn/",
+        legal_status=LegalStatus.PENDING,
+        legal_note="**这是剪刀差缺的那一半。** 法定公示信息，A 级，"
+                   "含企业注册与注销吊销 —— 供给侧的权威来源。"
+                   "⚠️ 该站有验证码与频率限制，直接抓取同样受第13条第3款约束；"
+                   "合规路径是官方查询或走已获授权的商业数据方（企查查/天眼查）。",
+        reviewed_on="",
+    ),
+    SourceRecord(
+        key="bidding_gov",
+        name="全国公共资源交易平台（招投标）",
+        access_method=AccessMethod.PUBLIC_DOWNLOAD,
+        tos_url="",
+        legal_status=LegalStatus.PENDING,
+        legal_note="法定公开招投标信息。可作 B 端需求的先行指标，"
+                   "也能反映某品类的采购方数量（弱供给侧信号）。",
+        reviewed_on="",
+    ),
     SourceRecord(
         key="qcc_open",
         name="企查查开放平台（工商/注销吊销/经营范围高级搜索）",

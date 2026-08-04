@@ -341,3 +341,68 @@ class TestDeliverables(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAttentionConstraint(unittest.TestCase):
+    """热榜不能单独支撑高分 —— 依据是公式定义，不是拟合。"""
+
+    def test_attention_only_is_capped(self):
+        from oic.scoring.attention import apply_cap, profile_sources
+        p = profile_sources(["weibo_hot", "rss_36kr", "douyin_hot"])
+        self.assertTrue(p.attention_only)
+        self.assertFalse(p.scissors_computable)
+        capped, _ = apply_cap(100.0, p)
+        self.assertLess(capped, 100.0)
+
+    def test_supply_evidence_removes_cap(self):
+        from oic.scoring.attention import apply_cap, profile_sources
+        p = profile_sources(["weibo_hot", "gsxt_gov"])
+        self.assertTrue(p.scissors_computable)
+        capped, _ = apply_cap(100.0, p)
+        self.assertEqual(capped, 100.0)
+
+    def test_prospectus_counts_as_supply_side(self):
+        from oic.scoring.attention import profile_sources
+        for key in ("sec_edgar", "cninfo", "qcc_open", "trademark_gov"):
+            self.assertTrue(profile_sources([key]).has_supply_evidence, key)
+
+    def test_stats_gov_is_still_demand_side(self):
+        """国家统计局是 A 级，但仍是需求侧 —— 等级高不等于补上了另一半。"""
+        from oic.scoring.attention import profile_sources
+        self.assertFalse(profile_sources(["stats_gov"]).has_supply_evidence)
+
+    def test_explanation_names_the_fix(self):
+        from oic.scoring.attention import profile_sources
+        text = "".join(profile_sources(["weibo_hot"]).explanation)
+        self.assertIn("补数据", text)
+
+    def test_no_hotness_penalty_term(self):
+        """只按证据结构封顶，不按热度高低扣分 —— 后者是在 n=7 上拟合噪声。"""
+        from oic.scoring.attention import apply_cap, profile_sources
+        p = profile_sources(["weibo_hot"])
+        low, _ = apply_cap(10.0, p)
+        high, _ = apply_cap(100.0, p)
+        self.assertAlmostEqual(high / low, 10.0)
+
+
+class TestHotListSourcesAreBlocked(unittest.TestCase):
+    def test_scraped_hot_lists_never_cleared(self):
+        registry = prov.default_registry()
+        for key in ("weibo_hot", "zhihu_hot", "douyin_hot"):
+            record = registry.get(key)
+            self.assertEqual(record.access_method, prov.AccessMethod.SCRAPING)
+            self.assertFalse(record.allowed, f"{key} 不应被放行")
+
+    def test_anti_scraping_is_documented_as_legal_signal(self):
+        record = prov.default_registry().get("weibo_hot")
+        self.assertIn("停止信号", record.legal_note)
+
+    def test_rss_is_better_positioned_than_scraping(self):
+        registry = prov.default_registry()
+        self.assertEqual(registry.get("rss_36kr").access_method,
+                         prov.AccessMethod.PUBLIC_DOWNLOAD)
+
+    def test_supply_side_gap_source_registered(self):
+        """剪刀差缺的那一半必须在登记表里有位置。"""
+        record = prov.default_registry().get("gsxt_gov")
+        self.assertIn("剪刀差", record.legal_note)
