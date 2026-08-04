@@ -288,3 +288,89 @@ class TestHonestCount(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestInvestigation(unittest.TestCase):
+    def test_query_matrix_covers_all_angles(self):
+        from oic.research.investigate import QUERY_TEMPLATES, build_query_matrix
+        m = build_query_matrix("盲盒", [2022])
+        self.assertEqual({a for a, _, _ in m}, set(QUERY_TEMPLATES))
+
+    def test_unknown_angle_rejected(self):
+        from oic.research.investigate import build_query_matrix
+        with self.assertRaises(ValueError):
+            build_query_matrix("x", [2022], ["不存在的角度"])
+
+    def test_plan_skips_angles_already_covered(self):
+        from oic.research import metrics as m
+        from oic.research.investigate import Angle, plan_investigation
+        plan = plan_investigation("盲盒", [2022], [m.MARKET_SIZE_ALL, m.DEMAND_GROWTH])
+        self.assertNotIn(Angle.DEMAND_SIZE, plan.missing_angles)
+        self.assertIn(Angle.SUPPLY_ENTRY, plan.missing_angles)
+
+
+class TestSourceIndependence(unittest.TestCase):
+    def test_reprints_of_one_originator_count_as_one(self):
+        """十篇转引艾媒的报道不是十个证据，是一个。"""
+        from oic.research.investigate import SourceNode, assess_independence
+        nodes = [SourceNode(f"media{i}", "据艾媒咨询数据显示") for i in range(10)]
+        r = assess_independence(nodes)
+        self.assertEqual(r.n_sources, 10)
+        self.assertEqual(r.n_effective, 1)
+        self.assertFalse(r.anchored)
+        self.assertAlmostEqual(r.inflation, 10.0)
+
+    def test_genuinely_independent_sources_counted(self):
+        from oic.research.investigate import SourceNode, assess_independence
+        nodes = [SourceNode("a", "据企查查"), SourceNode("b", "据国家统计局"),
+                 SourceNode("c", "据弗若斯特沙利文")]
+        r = assess_independence(nodes)
+        self.assertEqual(r.n_effective, 3)
+        self.assertTrue(r.anchored)
+
+    def test_mixed_case_flags_the_inflated_group(self):
+        from oic.research.investigate import SourceNode, assess_independence
+        nodes = [SourceNode("m1", "据艾媒"), SourceNode("m2", "据艾媒咨询"),
+                 SourceNode("s", "据国家统计局")]
+        r = assess_independence(nodes)
+        self.assertEqual(r.n_effective, 2)
+        self.assertTrue(any("同溯至" in l for l in r.lines()))
+
+    def test_empty_rejected(self):
+        from oic.research.investigate import assess_independence
+        with self.assertRaises(ValueError):
+            assess_independence([])
+
+
+class TestSaturation(unittest.TestCase):
+    def test_detects_saturation_when_yield_dries_up(self):
+        from oic.research.investigate import assess_saturation
+        r = assess_saturation([("demand_size", 8), ("supply_entry", 5),
+                               ("concentration", 3), ("capital", 0),
+                               ("channel", 0), ("regulation", 0)])
+        self.assertTrue(r.saturated)
+        self.assertEqual(r.saturation_index, 4)
+
+    def test_not_saturated_while_still_productive(self):
+        from oic.research.investigate import assess_saturation
+        r = assess_saturation([("a", 5), ("b", 5), ("c", 5), ("d", 5)])
+        self.assertFalse(r.saturated)
+
+    def test_zero_yield_angles_are_named(self):
+        """零产出的角度要点名——那是数据不存在，不是查得不够。"""
+        from oic.research.investigate import assess_saturation
+        r = assess_saturation([("demand_size", 6), ("supply_exit", 0),
+                               ("supply_exit", 0), ("supply_exit", 0)])
+        self.assertIn("supply_exit", r.angles_empty)
+        self.assertIn("demand_size", r.angles_covered)
+        self.assertTrue(any("不存在于公开渠道" in l for l in r.lines()))
+
+    def test_negative_yield_rejected(self):
+        from oic.research.investigate import assess_saturation
+        with self.assertRaises(ValueError):
+            assess_saturation([("a", -1)])
+
+    def test_empty_rejected(self):
+        from oic.research.investigate import assess_saturation
+        with self.assertRaises(ValueError):
+            assess_saturation([])

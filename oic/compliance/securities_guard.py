@@ -30,13 +30,23 @@ from typing import Iterable
 
 # --- ① 具体证券标识 -------------------------------------------------------
 # A股6位代码（含常见前缀）、港股5位、美股 ticker 与常见交易所标注
+#: ⚠️ 交易所后缀必须加 (?![A-Za-z]) 否则会误杀 URL。
+#: 真实踩过的坑：新浪链接 `doc-ikyamrmz7882579.shtml` 里
+#: `882579` 后面跟着 `.sh`（来自 `.shtml`），被判成 A 股代码。
+#: 商业计划书引用的每条证据都带 URL，这个误杀会让整份报告被阻断 ——
+#: 而误杀正是最终导致团队关掉这道闸的原因。
 _SECURITY_ID = re.compile(
-    r"(?:(?:sh|sz|bj|SH|SZ|BJ)\s*[.:]?\s*\d{6})"
-    r"|(?:\d{6}\s*\.?\s*(?:SH|SZ|BJ|sh|sz|bj))"
+    r"(?:(?<![A-Za-z0-9])(?:sh|sz|bj|SH|SZ|BJ)\s*[.:]?\s*\d{6}(?!\d))"
+    r"|(?:(?<!\d)\d{6}\s*\.?\s*(?:SH|SZ|BJ|sh|sz|bj)(?![A-Za-z0-9]))"
     r"|(?:(?:股票|个股|证券|基金|标的)\s*代码\s*[:：]?\s*\d{5,6})"
     r"|(?:\bHK\s*\d{4,5}\b)"
     r"|(?:\b(?:NASDAQ|NYSE|纳斯达克|纽交所)\s*[:：]\s*[A-Z]{1,5}\b)"
 )
+
+#: URL 里含任意数字串，天然容易撞上证券代码模式。
+#: 扫描前先把它们替换成占位符 —— 链接本身不是「投资建议」。
+_URL = re.compile(r"https?://\S+|www\.\S+")
+_URL_PLACEHOLDER = "「链接」"
 
 # --- ② 荐股动作 -----------------------------------------------------------
 _RECOMMEND = re.compile(
@@ -106,11 +116,25 @@ class GuardResult:
         )
 
 
+def mask_urls(text: str) -> str:
+    """把 URL 替换成等长占位符再扫描。
+
+    等长是刻意的：违规位置 ``position`` 必须仍然指向原文的正确偏移，
+    否则人工复核时按位置去原文找会对不上。
+    """
+    return _URL.sub(lambda m: "\u3000" * len(m.group(0)), text)
+
+
 def scan(text: str) -> tuple[Violation, ...]:
-    """按固定规则顺序扫描，返回全部命中。"""
+    """按固定规则顺序扫描，返回全部命中。
+
+    URL 先被屏蔽 —— 链接里的数字串不是投资建议，
+    但它们会撞上证券代码模式（真实踩过：`.shtml` 前的 6 位数）。
+    """
+    masked = mask_urls(text)
     found: list[Violation] = []
     for code, category, pattern, message in _RULES:
-        for match in pattern.finditer(text):
+        for match in pattern.finditer(masked):
             found.append(Violation(code, category, match.group(0), match.start(), message))
     # 按位置排序，保证确定性
     return tuple(sorted(found, key=lambda v: (v.position, v.code)))
@@ -162,6 +186,9 @@ _MUST_BLOCK: tuple[str, ...] = (
 
 #: 必须 0 误杀 —— 纯商业机会分析
 _MUST_PASS: tuple[str, ...] = (
+    "依据：market_size = 478亿元（来源：sina · "
+    "https://finance.sina.com.cn/chanjing/cyxw/2022-01-28/doc-ikyamrmz7882579.shtml）",
+    "参考 https://www.stcn.com/article/detail/820716.html 的行业数据",
     "该品类需求增速 45%，供给增速 12%，剪刀差 33 个百分点，窗口开着。",
     "建议先做 10 个用户访谈验证切换势能，成本上限 5000 元。",
     "TAM = 潜在客户数 × 客户年均支出 = 200 万人 × 800 元 = 16 亿元。",
