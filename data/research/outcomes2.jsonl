@@ -1,0 +1,16 @@
+// COHORT 2 结局（2026 窗口）—— 采集于 as-of 信号 commit(5ef38f1) 之后
+// 标签定义沿用 PROTOCOL.md 第三节，采集前已冻结。
+{"category_key":"community_group_buy","outcome_demand":0,"outcome_opportunity":0,"note":"2026年美团优选完全关停，淘菜菜、京喜拼拼均已退出，只剩多多买菜(62%份额)与兴盛优选两家。退出原因是履约成本打不过多多的低价策略。品类整体大幅收缩","sources":["https://cj.sina.com.cn/articles/view/7879923953/1d5ae18f106801i4mq"],"retrieved_at":"2026-08-04"}
+{"category_key":"pet_economy","outcome_demand":0,"outcome_opportunity":0,"note":"宠物食品增速持续放缓，狗粮自2021年起稳定在2160-2180亿元即基本零增长，进入平台期。2026Q1上市公司利润普遍下滑：佩蒂-63.7%、乖宝-39.5%、中宠-19.8%，净利率近两年低点；蓝馔2026年5月关闭中国旗舰店。⚠️无2026直接增速数字，demand=0 系基于「平台期」「增速放缓」多处定性证据的判断","sources":["https://m.ebrun.com/662524.html","https://www.qianzhan.com/analyst/detail/220/260422-56a8f21d.html"],"retrieved_at":"2026-08-04"}
+{"category_key":"snack_discount","outcome_demand":1,"outcome_opportunity":1,"note":"鸣鸣很忙2026年1月过港交所聆讯，3月发布上市后首份年报，营收661.7亿元，门店21948家（2025年9月30日为19517家）。行业形成鸣鸣很忙与万辰双寡头，均超万店。⚠️检索摘要曾把661.7亿误译为661.7 billion，差10倍，此处按中文原文记","sources":["https://www.shopex.cn/news/archives/32233.html","https://www.qianzhan.com/analyst/detail/220/260721-515cb650.html"],"retrieved_at":"2026-08-04"}
+{"category_key":"instant_retail","outcome_demand":1,"outcome_opportunity":0,"note":"2026年规模突破1万亿元（2023年为6500亿），十五五期间年均增速约12.6%。但2026年平台收紧补贴管控、黄牛离场、消费者对低价脱敏，行业从爆发式增长回归理性。美团京东阿里三方博弈，巨头主导。⚠️opportunity=0 依据是补贴战与巨头格局，属判断非硬数据","sources":["https://www.stcn.com/article/detail/987286.html","https://www.huxiu.com/article/4873027.html"],"retrieved_at":"2026-08-04"}
+// --- 以下无可靠 2026 实测结局，按规则标 null 并计入分母 ---
+{"category_key":"low_alcohol","outcome_demand":null,"outcome_opportunity":null,"note":"未查到2026年低度酒单独的市场数据","sources":[],"retrieved_at":"2026-08-04"}
+{"category_key":"standup_comedy","outcome_demand":null,"outcome_opportunity":null,"note":"未查到2026年脱口秀演出市场数据","sources":[],"retrieved_at":"2026-08-04"}
+{"category_key":"aigc","outcome_demand":null,"outcome_opportunity":null,"note":"as-of 备案数来自C级源被规则拒绝采信，且无2026品类级增速数据","sources":[],"retrieved_at":"2026-08-04"}
+{"category_key":"noodle_chain","outcome_demand":null,"outcome_opportunity":null,"note":"未采集","sources":[],"retrieved_at":"2026-08-04"}
+{"category_key":"live_commerce","outcome_demand":null,"outcome_opportunity":null,"note":"未采集","sources":[],"retrieved_at":"2026-08-04"}
+{"category_key":"web3","outcome_demand":null,"outcome_opportunity":null,"note":"未采集","sources":[],"retrieved_at":"2026-08-04"}
+{"category_key":"hard_tech","outcome_demand":null,"outcome_opportunity":null,"note":"未采集","sources":[],"retrieved_at":"2026-08-04"}
+{"category_key":"discount_retail","outcome_demand":null,"outcome_opportunity":null,"note":"未采集","sources":[],"retrieved_at":"2026-08-04"}
+{"category_key":"ai_video","outcome_demand":null,"outcome_opportunity":null,"note":"未采集","sources":[],"retrieved_at":"2026-08-04"}

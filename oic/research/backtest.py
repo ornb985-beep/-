@@ -23,6 +23,13 @@ from oic.research.dossier import Observation, build_dossier, load_observations
 DATA_DIR = Path(__file__).resolve().parents[2] / "data" / "research"
 AS_OF = "2022-12-31"
 
+#: 双队列：cohort 1 (as-of 2022 → 2025) 与 cohort 2 (as-of 2023 → 2026)。
+#: 分开 as-of 是因为两批的信息截止日不同，时间闸必须各用各的。
+COHORTS: tuple[tuple[int, str, str, str, str], ...] = (
+    (1, "2022-12-31", "categories.jsonl", "observations.jsonl", "outcomes.jsonl"),
+    (2, "2023-12-31", "categories2.jsonl", "observations2.jsonl", "outcomes2.jsonl"),
+)
+
 #: 样本量低于此值时，任何相关系数都只能当方向性提示
 MIN_N_FOR_STATISTICS = 8
 
@@ -97,6 +104,7 @@ class CategorySignal:
     outcome_demand: int | None = None       # 主标签
     outcome_opportunity: int | None = None  # 副标签
     outcome_note: str = ""
+    cohort: int = 1
     insufficient: tuple[str, ...] = field(default_factory=tuple)
 
     @property
@@ -111,8 +119,23 @@ class CategorySignal:
         return self.scissors is not None and self.outcome_demand is not None
 
 
+def load_all_cohorts() -> list[CategorySignal]:
+    """合并两批样本。每批用自己的 as-of 日期过时间闸。"""
+    combined: list[CategorySignal] = []
+    for cohort, as_of, cat_file, obs_file, out_file in COHORTS:
+        cats = load_categories(DATA_DIR / cat_file)
+        obs = load_observations(DATA_DIR / obs_file)
+        signals = extract_signals(cats, obs, as_of=as_of)
+        attach_outcomes(signals, load_outcomes(DATA_DIR / out_file))
+        for s in signals:
+            s.cohort = cohort
+        combined.extend(signals)
+    return combined
+
+
 def extract_signals(
-    categories: list[dict], observations: list[Observation]
+    categories: list[dict], observations: list[Observation],
+    as_of: str = AS_OF,
 ) -> list[CategorySignal]:
     """从档案里提取回测所需的信号。缺失即标记，不猜测。
 
@@ -131,19 +154,21 @@ def extract_signals(
         if finding.check == "growth_consistency"
     }
 
+    as_of_year = int(as_of.split("-")[0])
     signals: list[CategorySignal] = []
 
     for category in categories:
         key, name = category["key"], category["name"]
-        dossier = build_dossier(key, name, observations, AS_OF, enforce_gate=True)
+        dossier = build_dossier(key, name, observations, as_of, enforce_gate=True)
 
         signal = CategorySignal(key=key, name=name)
         missing: list[str] = []
 
         # 需求增速：优先直接观测到的增速，其次由两年存量推算
-        demand = dossier.value(mx.DEMAND_GROWTH, 2022)
+        year = as_of_year
+        demand = dossier.value(mx.DEMAND_GROWTH, year)
         if demand is None:
-            demand = dossier.growth_pct(mx.MARKET_SIZE_ALL, 2022, 2021)
+            demand = dossier.growth_pct(mx.MARKET_SIZE_ALL, year, year - 1)
         if demand is None:
             missing.append("需求增速")
         signal.demand_growth = demand
@@ -151,14 +176,14 @@ def extract_signals(
         # 供给增速：优先直接观测到的企业注册同比，
         # 其次由两年新增注册数推算，最后退到门店数推算
         supply = dossier.value(
-            mx.MetricKey(mx.Family.GROWTH_RATE, mx.Scope.DRIVEN, mx.Measure.FLOW), 2022
+            mx.MetricKey(mx.Family.GROWTH_RATE, mx.Scope.DRIVEN, mx.Measure.FLOW), year
         )
         if supply is None:
-            supply = dossier.growth_pct(mx.COMPANY_NEW, 2022, 2021)
+            supply = dossier.growth_pct(mx.COMPANY_NEW, year, year - 1)
         if supply is None:
             supply = dossier.growth_pct(
                 mx.MetricKey(mx.Family.STORE_COUNT, mx.Scope.ALL, mx.Measure.STOCK),
-                2022, 2020,
+                year, year - 2,
             )
             if supply is not None:
                 supply /= 2.0     # 两年跨度折算成年化
@@ -227,9 +252,9 @@ def build_report(signals: list[CategorySignal]) -> list[str]:
     add("## 覆盖率（按规则 E2，数据缺失的品类保留在分母里）")
     add("")
     add(f"- 样本池：{total} 个品类")
-    add(f"- 有 as-of 2022 需求增速：{len(with_demand)}/{total}")
-    add(f"- 有 as-of 2022 剪刀差（需求+供给都有）：{len(with_scissors)}/{total}")
-    add(f"- 有 2025 结局：{len(with_outcome)}/{total}")
+    add(f"- 有 as-of 需求增速：{len(with_demand)}/{total}")
+    add(f"- 有 as-of 剪刀差（需求+供给都有）：{len(with_scissors)}/{total}")
+    add(f"- 有已解析结局：{len(with_outcome)}/{total}")
     add("")
 
     missing = [s for s in signals if s.insufficient]
@@ -239,16 +264,16 @@ def build_report(signals: list[CategorySignal]) -> list[str]:
             add(f"  - {s.name}：缺 {'、'.join(s.insufficient)}")
         add("")
 
-    add("## 逐品类信号（as-of 2022-12-31）")
+    add("## 逐品类信号（cohort1 as-of 2022 / cohort2 as-of 2023）")
     add("")
-    add("| 品类 | 需求增速 | 供给增速 | 剪刀差 M | 主标签 | 副标签 |")
-    add("|---|---:|---:|---:|:---:|:---:|")
+    add("| 批 | 品类 | 需求增速 | 供给增速 | 剪刀差 M | 主标签 | 副标签 |")
+    add("|:--:|---|---:|---:|---:|:---:|:---:|")
     for s in sorted(signals, key=lambda x: (x.scissors is None, -(x.scissors or 0))):
         def fmt(v, suffix="%"):
             return "—" if v is None else f"{v:+.1f}{suffix}"
         def lab(v):
             return "—" if v is None else ("✅" if v == 1 else "❌")
-        add(f"| {s.name} | {fmt(s.demand_growth)} | {fmt(s.supply_growth)} | "
+        add(f"| {s.cohort} | {s.name} | {fmt(s.demand_growth)} | {fmt(s.supply_growth)} | "
             f"{fmt(s.scissors)} | {lab(s.outcome_demand)} | {lab(s.outcome_opportunity)} |")
     add("")
 
@@ -266,7 +291,7 @@ def build_report(signals: list[CategorySignal]) -> list[str]:
         try:
             rho = spearman([s.scissors for s in q1], [float(s.outcome_demand) for s in q1])
             add(f"- 样本 n = {len(q1)}")
-            add(f"- Spearman ρ(剪刀差, 主标签) = **{rho:+.3f}**")
+            add(f"- Spearman ρ(剪刀差, 已解析主标签) = **{rho:+.3f}**")
             verdict = "有方向性信号" if abs(rho) > 0.3 else "看不出信号"
             add(f"- 判据 |ρ| > 0.3：**{verdict}**")
         except ValueError as exc:
@@ -295,7 +320,7 @@ def build_report(signals: list[CategorySignal]) -> list[str]:
 
             test = permutation_test_binary(xs, ys)
             add(f"- 样本 n = {len(q1b)}")
-            add(f"- Spearman ρ(2022需求增速, 2025主标签) = **{test.statistic:+.3f}**")
+            add(f"- Spearman ρ(as-of 需求增速, 已解析结局) = **{test.statistic:+.3f}**")
             add(f"- **精确置换检验**：p = **{test.p_value:.3f}**"
                 f"（穷举 {test.n_permutations} 种排列，非近似）")
             try:
@@ -370,7 +395,7 @@ def build_report(signals: list[CategorySignal]) -> list[str]:
         top, bottom = ordered[:half], ordered[-half:]
         top_rate = sum(s.outcome_demand for s in top) / len(top)
         bottom_rate = sum(s.outcome_demand for s in bottom) / len(bottom)
-        add(f"- 按 2022 需求增速排序，前 {len(top)} 名实际成功率 **{top_rate:.0%}**")
+        add(f"- 按 as-of 需求增速排序，前 {len(top)} 名实际成功率 **{top_rate:.0%}**")
         add(f"- 后 {len(bottom)} 名实际成功率 **{bottom_rate:.0%}**")
         add(f"- 差值 **{top_rate - bottom_rate:+.0%}**（判据 > 0）")
     else:
@@ -400,29 +425,24 @@ def build_report(signals: list[CategorySignal]) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
-    categories = load_categories(DATA_DIR / "categories.jsonl")
-    observations = load_observations(DATA_DIR / "observations.jsonl")
-
-    print(f"样本池 {len(categories)} 个品类，观测 {len(observations)} 条")
-
     try:
-        signals = extract_signals(categories, observations)
+        signals = load_all_cohorts()
     except PermissionError as exc:
         print(f"\n⛔ 未来信息泄漏，回测中止：\n{exc}", file=sys.stderr)
         return 1
+
+    by_cohort: dict[int, int] = {}
+    for s in signals:
+        by_cohort[s.cohort] = by_cohort.get(s.cohort, 0) + 1
+    print("样本池：" + "，".join(
+        f"cohort {c} 共 {n} 个品类" for c, n in sorted(by_cohort.items())))
+    print(f"合计 {len(signals)} 个品类")
 
     if "--dry-run" in argv:
         print("✅ as-of 时间闸检查通过，无未来信息泄漏")
         usable = sum(1 for s in signals if s.demand_growth is not None)
         print(f"   {usable}/{len(signals)} 个品类有可用的 as-of 需求信号")
         return 0
-
-    outcomes = load_outcomes(DATA_DIR / "outcomes.jsonl")
-    if not outcomes:
-        print("\n⚠️ 结局数据尚未采集（data/research/outcomes.jsonl 不存在）。")
-        print("   按协议，结局必须在 as-of 评分之后才采集。")
-        return 0
-    attach_outcomes(signals, outcomes)
 
     report = build_report(signals)
     text = "\n".join(report)

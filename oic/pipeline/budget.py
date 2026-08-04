@@ -38,13 +38,37 @@ class BudgetMisconfigured(ValueError):
     """配额设置自相矛盾 —— 启动即失败，好过线上才发现。"""
 
 
+#: 表示"不设上限"。用一个极大整数而非 None，
+#: 这样所有算术与比较都不需要分支判断。
+UNLIMITED = 2 ** 62
+
+
 @dataclass(frozen=True)
 class DailyCaps:
-    """每日硬顶。默认值取自设计文档的保守一档。"""
+    """每日硬顶。
 
-    search: int = 10
-    fetch: int = 30
-    llm: int = 12
+    **默认不限制。** 配额是给成本敏感的部署用的可选闸门，
+    不是默认姿态 —— 信息质量的瓶颈从来不是调用次数。
+
+    需要控成本时显式传入上限，或用 ``DailyCaps.conservative()``
+    取设计文档里那一档保守值。
+    """
+
+    search: int = UNLIMITED
+    fetch: int = UNLIMITED
+    llm: int = UNLIMITED
+
+    @classmethod
+    def conservative(cls) -> "DailyCaps":
+        """设计文档里的保守档：搜索≤10 / 抓取≤30 / LLM≤12 次/天。"""
+        return cls(search=10, fetch=30, llm=12)
+
+    @classmethod
+    def unlimited(cls) -> "DailyCaps":
+        return cls()
+
+    def is_unlimited(self, resource: str) -> bool:
+        return self.get(resource) >= UNLIMITED
 
     def get(self, resource: str) -> int:
         if resource not in ALL_RESOURCES:
@@ -87,6 +111,8 @@ class Ledger:
         return max(self._caps.get(resource) - self._spent[resource], 0)
 
     def utilization(self, resource: str) -> float:
+        if self._caps.is_unlimited(resource):
+            return 0.0
         cap = self._caps.get(resource)
         return self._spent[resource] / cap if cap else 1.0
 
@@ -118,8 +144,11 @@ class Ledger:
     def report(self) -> tuple[str, ...]:
         lines = [f"配额账本 · {self._day}"]
         for resource in ALL_RESOURCES:
-            cap = self._caps.get(resource)
             used = self._spent[resource]
+            if self._caps.is_unlimited(resource):
+                lines.append(f"  {resource:<7} {used:>4}/不限")
+                continue
+            cap = self._caps.get(resource)
             flag = "  ⚠️ 已耗尽" if used >= cap else ""
             lines.append(f"  {resource:<7} {used:>4}/{cap:<4}"
                          f"（{self.utilization(resource):.0%}）{flag}")
@@ -205,6 +234,8 @@ def assert_funnel_feasible(
     for resource in ALL_RESOURCES:
         need = plan.total_cost(resource)
         cap = caps.get(resource)
+        if caps.is_unlimited(resource):
+            continue
         if need > cap:
             violations.append(
                 f"{resource} 需要 {need} 次但硬顶是 {cap} 次 —— 差 "

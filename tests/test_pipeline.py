@@ -185,6 +185,30 @@ class TestBudgetCaps(unittest.TestCase):
         self.assertIn("不要降级凑数", str(ctx.exception))
 
 
+class TestUnlimitedByDefault(unittest.TestCase):
+    def test_default_caps_are_unlimited(self):
+        caps = DailyCaps()
+        for r in (Resource.SEARCH, Resource.FETCH, Resource.LLM):
+            self.assertTrue(caps.is_unlimited(r))
+
+    def test_unlimited_never_exhausts(self):
+        ledger = Ledger(DailyCaps(), "2026-08-04")
+        ledger.consume(Resource.LLM, 1_000_000, reason="全量精评")
+        self.assertEqual(ledger.spent(Resource.LLM), 1_000_000)
+
+    def test_the_83x_funnel_passes_when_unlimited(self):
+        """默认不限时，1000 次精评不再被拦。"""
+        stages = [
+            FunnelStage("规则打分", 10_000, 1_000, None),
+            FunnelStage("LLM精评", 1_000, 1_000, Resource.LLM, 1),
+        ]
+        self.assertTrue(assert_funnel_feasible(stages, DailyCaps()).feasible)
+
+    def test_conservative_preset_still_available(self):
+        caps = DailyCaps.conservative()
+        self.assertEqual((caps.search, caps.fetch, caps.llm), (10, 30, 12))
+
+
 class TestFunnelFeasibility(unittest.TestCase):
     def test_feasible_funnel_passes(self):
         stages = [
