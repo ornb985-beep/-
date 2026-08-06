@@ -38,6 +38,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 from oic import SCORING_ENGINE_VERSION, __version__
@@ -373,7 +374,26 @@ class OIC:
         """预检：不抛异常，只返回会拦在哪。给你的 App 做实时提示用。"""
         return guard(body).report()
 
-    # -- ⑤ 能力自陈 --------------------------------------------------------
+    # -- ⑤ 知识库 ----------------------------------------------------------
+
+    def knowledge(self, root: "Path | None" = None):
+        """只读打开知识库，供你的 App 按三轴查询、追溯演化链。
+
+        ``Store`` 上常用的四个入口：
+
+            select(domain=, type=, maturity=)   按三轴过滤
+            chain(id)                           回溯到最初版本
+            current(id)                         顺着取代链走到最新版
+            falsified                           被推翻的结论
+
+        最后一个不是垃圾桶。**被推翻的结论记录了「为什么错」**，
+        而那是防止同一个错误再犯的唯一依据。
+        """
+        from oic.kb.store import load, repo_root_from
+
+        return load(root or repo_root_from())
+
+    # -- ⑥ 能力自陈 --------------------------------------------------------
 
     def capabilities(self, n_resolved_outcomes: int = 0) -> CapabilityReport:
         """诚实回答「现在这套东西能干什么」。

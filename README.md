@@ -5,11 +5,20 @@
 零第三方依赖，`python3` 直接可跑。
 
 ```bash
-python -m unittest discover -s tests -v      # 360 项测试
+python -m unittest discover -s tests -v      # 423 项测试
 ```
 
 **先看这个**：[docs/v4/11-全景总纲.md](docs/v4/11-全景总纲.md) ——
 当前系统的完整状态，每条公式、每个拒绝条件、每个实证数字、每个已抓到的错误。
+
+**知识库**：[kb/](kb/README.md) —— 210 条原子条目 + 7 份技能流程，
+可追溯、可叠加进化、可复用迭代。校验器强制每条都有真实出处。
+
+```bash
+python -m oic.kb --stats            # 全库概况
+python -m oic.kb --find 剪刀差       # 搜
+python -m oic.kb --show K-STA-024   # 看一条被推翻的结论及其教训
+```
 
 ---
 
@@ -47,6 +56,7 @@ python -m unittest discover -s tests -v      # 360 项测试
 | `oic/deliver/` | top3 BP、90 天四阶段（带量化止损）、人/钱/平台 |
 | `oic/pipeline/` | 成本硬顶 + 漏斗可行性断言 |
 | `oic/sdk.py` | **嵌入你的 App/智能体**——把纪律一起打包，不只是转发 import |
+| `oic/kb/` | **知识库内核**——六条校验、确定性索引、supersede/falsify 演化（**无 delete**） |
 | `db/schema.sql` | 12 张表 + 不可变触发器 + RLS |
 
 ### 三条设计纪律，写进了代码
@@ -118,13 +128,15 @@ for line in result.audit:
 ## 自检
 
 ```bash
-python -m unittest discover -s tests -v                # 360 项
+python -m unittest discover -s tests -v                # 423 项
 python -m oic.scoring.kelly --selftest                 # Kelly 三重安全阀
 python -m oic.calibration.report --selftest            # Brier/Murphy/分层/代理
 python -m oic.compliance.securities_guard --selftest   # 100% 拦截 / 0 误杀
 python -m oic.evidence.grounding --selftest            # span 字符级校验
 python -m oic.research.audit --selftest                # 纠错内核（含 100× 单位错回归）
 python -m oic.stats.overfit --selftest                 # 20 特征 × n=8 必须报高 PBO
+python -m oic.kb --check                               # 知识库六条校验
+python -m oic.kb --selftest                            # 断言六道闸真的会拦
 python -m oic.eval.run --golden data/golden.seed.jsonl --gate
 ```
 
@@ -147,6 +159,7 @@ python -m oic.eval.run --golden data/golden.seed.jsonl --gate
 | [10 嵌入你的App](docs/v4/10-嵌入你的App.md) | SDK 接入 + 为何没做默认全网爬虫 |
 | **[11 全景总纲](docs/v4/11-全景总纲.md)** | **后端全量：公式/拒绝条件/实证数字/错误清单** |
 | [12 无限检索与智能体集群](docs/v4/12-无限检索与智能体集群.md) | 不限成本决策 / 分层降本 / 多方求证 / 「躺赚」口径 |
+| **[知识库](kb/README.md)** | **210 条条目 + 7 份技能流程 + 分类学 + 字段契约** |
 
 ---
 
