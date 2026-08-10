@@ -71,12 +71,33 @@ signoff_gate() {
     spec)  say "  它列了要做的功能和验收标准，砍掉你觉得没必要的，补上它漏掉的。" ;;
     stack) say "  它列了在哪儿落地、用什么做、大概花多少钱。你确认花销和方式能接受。" ;;
   esac
+  # 把文档里的「怎么验收这一步」直接打出来，省得你还要翻文件找
+  local checklist; checklist="$(extract_checklist "$doc")"
+  if [ -n "$checklist" ]; then
+    say ""
+    printf '%s五分钟验收单%s（照着过一遍就行，不用懂技术）\n' "$C_BOLD" "$C_OFF"
+    printf '%s\n' "$checklist"
+  fi
+
   say ""
   say "${C_DIM}提示：你直接在文件里改字、划掉、补充就行。你改过的地方，后面每一步都会当成最高优先级。${C_OFF}"
   say ""
-  say "改完（或者觉得没问题）之后，跑这个继续："
-  say "  ${C_BOLD}./loop.sh go${C_OFF}"
+  say "接下来你可以："
+  say "  ${C_BOLD}./loop.sh go${C_OFF}      看完没问题，继续往下"
+  say "  ${C_BOLD}./loop.sh judge${C_OFF}   不知道好不好？让它逼问自己一遍，给你选择题"
+  say "  ${C_BOLD}./loop.sh back${C_OFF}    这一步方向就不对，退回重做"
   rule
+}
+
+# 从文档里抠出「## 怎么验收这一步」那一段
+extract_checklist() {
+  local f="$1"
+  [ -f "$f" ] || return 0
+  awk '
+    /^##[[:space:]]*怎么验收这一步/ { on=1; next }
+    on && /^##[[:space:]]/ { on=0 }
+    on && !/^```/ { print }
+  ' "$f" | sed '/^[[:space:]]*$/d'
 }
 
 # ============================================================
@@ -260,6 +281,37 @@ cmd_explain() {
   claude_run "$CMD_DIR/explain.md" "${ctx[@]+"${ctx[@]}"}" || true
 }
 
+# 帮我判断：拿当前这一步的产出，逼问一遍，给出选择题
+cmd_judge() {
+  [ -f "$CMD_DIR/judge.md" ] || die "缺少 .claude/commands/judge.md"
+  local stage; stage="$(state_get stage goal)"
+  local ctx=() s d
+  for s in "${STAGES[@]}"; do
+    d="$(stage_doc "$s")"
+    [ -n "$d" ] && [ -f "$d" ] && ctx+=("$d")
+  done
+  [ -f "$ROOT/references/判断标准.md" ] && ctx+=("$ROOT/references/判断标准.md")
+  title "帮你判断：$(stage_label "$stage")"
+  rule
+  claude_run "$CMD_DIR/judge.md" "${ctx[@]+"${ctx[@]}"}" || true
+}
+
+# 纠错：先归因错在哪一层，再决定怎么改
+cmd_correct() {
+  [ -f "$CMD_DIR/correct.md" ] || die "缺少 .claude/commands/correct.md"
+  local ctx=() s d
+  for s in "${STAGES[@]}"; do
+    d="$(stage_doc "$s")"
+    [ -n "$d" ] && [ -f "$d" ] && ctx+=("$d")
+  done
+  [ -f "$ROOT/references/判断标准.md" ] && ctx+=("$ROOT/references/判断标准.md")
+  [ -f "$STATE_DIR/last-check.txt" ] && ctx+=("$STATE_DIR/last-check.txt")
+  title "纠错：先搞清楚错在哪一层"
+  say "${C_DIM}别急着改东西——改错层，越改越糟。${C_OFF}"
+  rule
+  claude_run "$CMD_DIR/correct.md" "${ctx[@]+"${ctx[@]}"}" || true
+}
+
 cmd_back() {
   local stage; stage="$(state_get stage goal)"
   local i; i="$(stage_index "$stage")"
@@ -295,7 +347,11 @@ cmd_help() {
   ./loop.sh go                   继续往下跑
   ./loop.sh status               看进度
   ./loop.sh explain              用大白话讲一遍现在什么情况
-  ./loop.sh back                 上一步做得不满意，退回去重做
+
+  ./loop.sh judge                它给了个东西，我不知道好不好 → 它逼问自己，给你选择题
+  ./loop.sh correct              感觉哪儿不对 → 先查错在哪一层，再决定怎么改
+
+  ./loop.sh back                 上一步方向就不对，退回去重做
   ./loop.sh reset                全部清空重来（先自动备份）
 
 九步流程：
@@ -327,6 +383,8 @@ main() {
     go|next|continue) cmd_go ;;
     status|st) cmd_status ;;
     explain|讲讲) cmd_explain ;;
+    judge|判断) cmd_judge ;;
+    correct|纠错) cmd_correct ;;
     back)    cmd_back ;;
     reset)   cmd_reset ;;
     help|-h|--help) cmd_help ;;
