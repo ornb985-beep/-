@@ -1,0 +1,29 @@
+// ============================================================================
+// 回测样本池 · 第二批（COHORT 2）—— 冻结文件（PRE-REGISTRATION）
+//
+// as-of 2023-12-31 → 结局 2026。全新时间窗，与 cohort 1 无重叠。
+//
+// 【本文件必须在采集任何 cohort-2 信号之前 commit。】
+//
+// 建这一批的理由：cohort 1 的 n=7 太小，任何相关系数都与噪声不可分
+// （实测 |ρ|=0.289 恰好等于纯随机的中位数）。扩样本是唯一出路。
+//
+// 样本仍由 2023 年当时的媒体榜单决定，不由我决定。
+// 与 cohort 1 重复的品类（元宇宙、剧本杀、咖啡、新茶饮）已剔除，
+// 避免同一品类跨窗口重复计数。
+//
+// 排除规则沿用 E1/E2（见 PROTOCOL.md）。
+// ============================================================================
+{"key":"community_group_buy","name":"社区团购","source_list":"《盘点2023年10大风口》","source_url":"https://zhuanlan.zhihu.com/p/558832844","list_published":"2023","cohort":2}
+{"key":"instant_retail","name":"即时零售/即时购","source_list":"《盘点2023年10大风口》","source_url":"https://zhuanlan.zhihu.com/p/558832844","list_published":"2023","cohort":2}
+{"key":"noodle_chain","name":"小面/面食连锁","source_list":"《盘点2023年10大风口》","source_url":"https://zhuanlan.zhihu.com/p/558832844","list_published":"2023","cohort":2}
+{"key":"low_alcohol","name":"低度酒","source_list":"《盘点2023年10大风口》","source_url":"https://zhuanlan.zhihu.com/p/558832844","list_published":"2023","cohort":2}
+{"key":"live_commerce","name":"直播带货","source_list":"《盘点2023年10大风口》","source_url":"https://zhuanlan.zhihu.com/p/558832844","list_published":"2023","cohort":2}
+{"key":"standup_comedy","name":"脱口秀","source_list":"《盘点2023年10大风口》","source_url":"https://zhuanlan.zhihu.com/p/558832844","list_published":"2023","cohort":2}
+{"key":"web3","name":"Web 3.0","source_list":"《盘点2023年10大风口》","source_url":"https://zhuanlan.zhihu.com/p/558832844","list_published":"2023","cohort":2}
+{"key":"hard_tech","name":"硬科技","source_list":"《盘点2023年10大风口》","source_url":"https://zhuanlan.zhihu.com/p/558832844","list_published":"2023","cohort":2}
+{"key":"pet_economy","name":"宠物经济","source_list":"36氪《2023年消费融资200+》（全年17起，称为黑马）","source_url":"https://36kr.com/p/2588671691389575","list_published":"2023","cohort":2}
+{"key":"snack_discount","name":"量贩零食","source_list":"CCFA 2023中国连锁Top100（鸣鸣很忙双位数增长）","source_url":"https://stcn.com/article/detail/1333949.html","list_published":"2023","cohort":2}
+{"key":"discount_retail","name":"折扣零售/硬折扣店","source_list":"CCFA 2023中国连锁Top100（好特卖、Costco）","source_url":"https://stcn.com/article/detail/1333949.html","list_published":"2023","cohort":2}
+{"key":"aigc","name":"AIGC/大模型","source_list":"创业邦《2023 AIGC产业观察》","source_url":"https://news.qq.com/rain/a/20230906A0937A00","list_published":"2023","cohort":2}
+{"key":"ai_video","name":"AI视频生成","source_list":"《盘点2023年度最火十大AIGC创新应用》","source_url":"https://www.163.com/dy/article/IMS7BNS305118O92.html","list_published":"2023","cohort":2}

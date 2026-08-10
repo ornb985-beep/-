@@ -1,0 +1,36 @@
+// ============================================================================
+// 回测样本池 —— 冻结文件（PRE-REGISTRATION）
+//
+// 【本文件必须在采集任何信号之前 commit。这是防事后诸葛的第一道机制。】
+//
+// 样本池不是我挑的，是 2022 年当时的媒体榜单挑的。每个品类都记录了它来自
+// 哪份榜单、该榜单的 URL 与发布日期 —— 全部早于结局发生，可复查。
+//
+// 为什么这么做：我的训练数据里包含 2023-2026 的事实，我知道谁死了。
+// 如果由我来挑品类，就会（哪怕无意地）挑出对系统有利的样本。
+// 用当年的热榜当样本池，选择权就不在我手里。
+//
+// 排除规则（先定，防止事后找借口剔除不利样本）：
+//   E1 非品类项（如"餐饮企业上市"是资本事件不是品类）→ 排除
+//   E2 采集后若 as-of 需求侧数据缺失 → 保留在池中，标记 insufficient_data，
+//      并在报告中计入分母。不得静默删除。
+//
+// 结局窗口：2025 年（as-of 2022-12-31 → 结局 2025，间隔约 3 年）
+// ============================================================================
+{"key":"health_snack","name":"健康零食","source_list":"钛媒体《2022，新消费八大风口》","source_url":"https://www.tmtpost.com/5981458.html","list_published":"2022-01-13"}
+{"key":"nonalcoholic_drink","name":"无酒精软饮","source_list":"钛媒体《2022，新消费八大风口》","source_url":"https://www.tmtpost.com/5981458.html","list_published":"2022-01-13"}
+{"key":"functional_skincare","name":"功能性护肤","source_list":"钛媒体《2022，新消费八大风口》","source_url":"https://www.tmtpost.com/5981458.html","list_published":"2022-01-13"}
+{"key":"chain_coffee","name":"线下连锁咖啡","source_list":"钛媒体《2022，新消费八大风口》/ 时代周报《2022十大消费风口》","source_url":"https://www.tmtpost.com/5981458.html","list_published":"2022-01-13"}
+{"key":"sugar_free","name":"无糖食品","source_list":"钛媒体《2022，新消费八大风口》","source_url":"https://www.tmtpost.com/5981458.html","list_published":"2022-01-13"}
+{"key":"plant_based","name":"植物基","source_list":"钛媒体《2022，新消费八大风口》","source_url":"https://www.tmtpost.com/5981458.html","list_published":"2022-01-13"}
+{"key":"outdoor_sports","name":"户外运动","source_list":"钛媒体《2022，新消费八大风口》","source_url":"https://www.tmtpost.com/5981458.html","list_published":"2022-01-13"}
+{"key":"niche_beauty","name":"垂类美妆","source_list":"钛媒体《2022，新消费八大风口》","source_url":"https://www.tmtpost.com/5981458.html","list_published":"2022-01-13"}
+{"key":"nft_collectible","name":"NFT数字藏品","source_list":"时代周报《2022十大消费风口》","source_url":"https://www.thepaper.cn/newsDetail_forward_21329378","list_published":"2022-12-25"}
+{"key":"new_tea","name":"新茶饮","source_list":"时代周报《2022十大消费风口》","source_url":"https://www.thepaper.cn/newsDetail_forward_21329378","list_published":"2022-12-25"}
+{"key":"camping","name":"露营","source_list":"时代周报《2022十大消费风口》（户外经济）","source_url":"https://www.thepaper.cn/newsDetail_forward_21329378","list_published":"2022-12-25"}
+{"key":"frisbee","name":"飞盘","source_list":"时代周报《2022十大消费风口》","source_url":"https://www.thepaper.cn/newsDetail_forward_21329378","list_published":"2022-12-25"}
+{"key":"blind_box","name":"盲盒","source_list":"时代周报《2022十大消费风口》（记为降温品类）","source_url":"https://www.thepaper.cn/newsDetail_forward_21329378","list_published":"2022-12-25"}
+{"key":"metaverse","name":"元宇宙","source_list":"2022 创业风口盘点","source_url":"https://www.tmtpost.com/6377392.html","list_published":"2022"}
+{"key":"virtual_human","name":"虚拟人","source_list":"2022 创业风口盘点","source_url":"https://m.huxiu.com/article/552625.html","list_published":"2022"}
+{"key":"script_murder","name":"剧本杀","source_list":"2022 创业风口盘点（沉浸经济）","source_url":"https://36kr.com/p/1227137075400322","list_published":"2022"}
+{"key":"prepared_meal","name":"预制菜","source_list":"2022 新消费复盘（2022年初C端一炮而红）","source_url":"https://www.lanjinger.com/d/201091","list_published":"2022"}

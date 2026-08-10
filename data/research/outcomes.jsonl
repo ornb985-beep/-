@@ -1,0 +1,21 @@
+// 结局数据（2025 窗口）—— 采集于 as-of 信号冻结并 commit 之后
+//
+// 标签定义在 PROTOCOL.md 第三节，采集前已冻结：
+//   outcome_demand      2025 年该品类规模同比增速 ≥10% → 1
+//   outcome_opportunity 增长 且 无价格战/大规模退出/头部亏损报道 → 1
+//
+// ⚠️ 无可靠数据一律 null，不插补、不用预测值代替实测值。
+//    用"预计2028年CAGR 17.5%"这种预测数当结局，就是拿模型验证模型。
+{"category_key":"chain_coffee","outcome_demand":1,"outcome_opportunity":0,"note":"2024现制咖啡1177亿元同比+15.39%，2025门店28.8万家；但价格战愈演愈烈，星巴克数十款产品降价约5元，行业主题为「规模化为王，低价不能停」","sources":["https://36kr.com/p/3408192681515398","https://www.chinabaogao.com/baogao/202502/742545.html"],"retrieved_at":"2026-08-04"}
+{"category_key":"new_tea","outcome_demand":1,"outcome_opportunity":0,"note":"2025现制茶饮门店66.9万家（2022为48.6万），规模仍增；但价格战持续、单店模型恶化。注：新茶饮与现制饮品口径混用，规模数存在冲突","sources":["http://www.news.cn/food/20250919/2f9b3a83eb1a4e65be8d3a4db21fa973/c.html"],"retrieved_at":"2026-08-04"}
+{"category_key":"blind_box","outcome_demand":1,"outcome_opportunity":1,"note":"泡泡玛特2024营收破130亿元，净利同比+188.8%，海外占比近40%；盲盒市场CAGR 28%。本样本中唯一双标签均为正的品类","sources":["https://www.shopex.cn/news/archives/25783.html","https://news.qq.com/rain/a/20250331A0936Y00"],"retrieved_at":"2026-08-04"}
+{"category_key":"prepared_meal","outcome_demand":1,"outcome_opportunity":0,"note":"2025规模6173亿元同比+27.3%，但增速较上年降6.5pct；全年价格战，上半年几乎无新增融资；惠发食品归母净利同比-319%，安井净利-8.46%","sources":["https://www.huxiu.com/article/4851946.html","https://m.chinabgao.com/info/1286282.html"],"retrieved_at":"2026-08-04"}
+{"category_key":"camping","outcome_demand":0,"outcome_opportunity":0,"note":"2024户外用品零售额274.4亿元，同比仅+1.2%，远低于10%门槛；2023年起热度下降，核心市场增速自2022年的52%大幅回落","sources":["https://www.chinabaogao.com/baogao/202410/730750.html"],"retrieved_at":"2026-08-04"}
+{"category_key":"metaverse","outcome_demand":0,"outcome_opportunity":0,"note":"新华网2025-09：曾是资本焦点，短短几年已悄然降温，标题即「泡沫破灭还是价值回归」","sources":["https://www.news.cn/tech/20250910/6996880576cd41839582204cb321c25f/c.html"],"retrieved_at":"2026-08-04"}
+{"category_key":"nft_collectible","outcome_demand":0,"outcome_opportunity":0,"note":"数字藏品热度显著下降；2022年8月腾讯幻核即已停止发行，该赛道未恢复","sources":["https://www.news.cn/tech/20250910/6996880576cd41839582204cb321c25f/c.html","https://www.thepaper.cn/newsDetail_forward_21448323"],"retrieved_at":"2026-08-04"}
+{"category_key":"script_murder","outcome_demand":0,"outcome_opportunity":0,"note":"2022年即市场低迷（线上规模-26.39%），融资总额自80亿降至2亿；2023规模154.2亿元，低于2022的238.9亿元。注：两数口径可能不同，但多路证据一致指向衰退","sources":["https://finance.sina.com.cn/tech/2022-04-04/doc-imcwipii2352507.shtml","https://www.iimedia.cn/c1020/90064.html"],"retrieved_at":"2026-08-04"}
+// --- 以下品类无可靠 2025 实测结局，按规则标 null 并计入分母 ---
+{"category_key":"functional_skincare","outcome_demand":null,"outcome_opportunity":null,"note":"仅查到「预计2028年达1224.4亿元、2023-2028 CAGR 17.54%」的预测值，无2025实测。用预测当结局＝拿模型验证模型，拒绝","sources":[],"retrieved_at":"2026-08-04"}
+{"category_key":"sugar_free","outcome_demand":null,"outcome_opportunity":null,"note":"无2025实测数据","sources":[],"retrieved_at":"2026-08-04"}
+{"category_key":"plant_based","outcome_demand":null,"outcome_opportunity":null,"note":"无2025实测数据；且2021基数为美元口径，与其他品类不可直接比","sources":[],"retrieved_at":"2026-08-04"}
+{"category_key":"nonalcoholic_drink","outcome_demand":null,"outcome_opportunity":null,"note":"仅有单一公司信号（元气森林2024「失去元气」报道），不足以代表品类","sources":[],"retrieved_at":"2026-08-04"}

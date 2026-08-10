@@ -1,0 +1,73 @@
+name: CI
+
+# 这套系统的价值建立在「闸门真的会响」之上。
+# 没有 CI，知识库七条校验与全量测试只在有人记得手动跑的时候才生效。
+on:
+  push:
+  pull_request:
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # 零第三方依赖，没有 pip install 这一步 —— 这是刻意的设计。
+
+      - name: 全量测试
+        run: python -m unittest discover -s tests
+
+      # 每个自检都在断言「这道闸真的会拦」。
+      # 单元测试测的是功能，自检测的是防线本身。
+      - name: 自检 · 校准（Brier / Murphy / 分层 / 代理）
+        run: python -m oic.calibration.report --selftest
+
+      - name: 自检 · 证券边界（100% 拦截 / 0 误杀）
+        run: python -m oic.compliance.securities_guard --selftest
+
+      - name: 自检 · 字符级 grounding
+        run: python -m oic.evidence.grounding --selftest
+
+      - name: 自检 · 六项确定性纠错
+        run: python -m oic.research.audit --selftest
+
+      - name: 自检 · 单位与币种归一
+        run: python -m oic.research.units --selftest
+
+      - name: 自检 · Kelly 三重安全阀
+        run: python -m oic.scoring.kelly --selftest
+
+      - name: 自检 · 招股书解析
+        run: python -m oic.sources.filing_parse --selftest
+
+      - name: 自检 · 过拟合检测（20 特征 × n=8 必须报高 PBO）
+        run: python -m oic.stats.overfit --selftest
+
+      - name: 自检 · 知识库七道闸
+        run: python -m oic.kb --selftest
+
+      - name: 知识库校验
+        run: python -m oic.kb --check
+
+      # 索引过期会让读者看到与实际不符的内容 —— 这类错误必须吵闹。
+      - name: 知识库索引同步
+        run: |
+          python -m oic.kb --index
+          git diff --exit-code kb/ || {
+            echo "::error::kb/INDEX.md 或 IDS.txt 已过期，请运行 python -m oic.kb --index 并提交"
+            exit 1
+          }
+
+      # golden 集当前 0 条，门禁优雅跳过而不是失败。
+      # 一个常红的 CI 会被学会忽略 —— 那比没有 CI 更糟（见 K-GOV-013）。
+      - name: Eval 门禁
+        run: python -m oic.eval.run --golden data/golden.seed.jsonl --gate
