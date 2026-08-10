@@ -11,6 +11,7 @@
 | ④ | 证伪不删除，且必须留下推翻它的证据 | 「为什么错」永远查不到 |
 | ⑤ | supersede 链双向一致、不成环 | 叠加进化断裂 |
 | ⑥ | playbook 引用必须解析得到 | 复用变成脱钩的拷贝 |
+| ⑦ | 正文里的代码位置引用必须存在 | 重命名后条目静默指向空气 |
 """
 
 from __future__ import annotations
@@ -25,6 +26,9 @@ from oic.kb.store import Store, iter_playbooks
 
 #: playbook 里对条目的引用写法：`[K-ACQ-001]`
 REFERENCE = re.compile(r"\[(K-[A-Z]{3}-\d{3})\]")
+
+#: 条目正文里的代码位置写法：`` `oic/kb/check.py::check_links` `` 或 `` `oic/kb/check.py` ``
+CODE_REF = re.compile(r"`([A-Za-z_][\w/]*(?:/[\w.]+)*\.py)(?:::(\w+))?`")
 
 
 class Severity:
@@ -128,6 +132,60 @@ def check_external_isolation(store: Store) -> list[Finding]:
                 f"唯一依据是 external 条目 {external_refs} —— "
                 "未经本项目验证的内容不得单独支撑已验证结论；"
                 "请补一条本仓库的代码/测试/实测出处，或把本条改为 external"))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# ⑦ 正文里的代码位置引用
+# ---------------------------------------------------------------------------
+
+
+def check_code_symbols(store: Store) -> list[Finding]:
+    """条目正文里引用的代码文件与符号必须真实存在。
+
+    第 ① 条只守 ``sources`` 字段。正文「代码位置」小节里的引用完全没人守 ——
+    重命名一个函数，几十条条目会**静默**指向不存在的东西，
+    而读者只会以为自己找不到。
+
+    两处刻意的宽松，都是为了不误报 —— **误报会把人逼着关掉这道闸**
+    （见 K-GOV-013：污染检测误报多于真报）：
+
+    1. **带 `/` 的才算代码位置声明。** 正文里写 `` `overfit.py` ``
+       是散文式提及某个模块，不是「去这里找」的承诺，不查。
+       写 `` `oic/stats/overfit.py` `` 才是。
+    2. 符号用 ``name in text`` 匹配，出现在 docstring 或注释里也算数。
+
+    但 `` `overfit.py::foo` `` 这种**有符号却没路径**的写法会被判错 ——
+    它声称了具体位置，却没给出能跳过去的路径。
+    """
+    out: list[Finding] = []
+    cache: dict[str, str | None] = {}
+
+    for entry in store.entries:
+        for match in CODE_REF.finditer(entry.body):
+            path, symbol = match.group(1), match.group(2)
+            if "/" not in path:
+                if symbol:
+                    out.append(Finding(
+                        Severity.ERROR, "code_symbols", entry.id,
+                        f"`{path}::{symbol}` 缺少目录 —— "
+                        "声称了具体位置就要给出能跳过去的完整路径"))
+                continue                      # 裸文件名是散文提及，不查
+            if path not in cache:
+                target = store.root / path
+                cache[path] = (target.read_text(encoding="utf-8")
+                               if target.is_file() else None)
+            text = cache[path]
+            if text is None:
+                out.append(Finding(
+                    Severity.ERROR, "code_symbols", entry.id,
+                    f"正文引用的代码文件不存在：`{path}`"))
+                continue
+            if symbol and symbol not in text:
+                out.append(Finding(
+                    Severity.ERROR, "code_symbols", entry.id,
+                    f"`{path}` 里找不到符号 `{symbol}` —— "
+                    "多半是重命名后忘了同步条目"))
     return out
 
 
@@ -260,6 +318,7 @@ def check_playbooks(store: Store) -> list[Finding]:
 
 ALL_CHECKS = (
     ("fields", check_fields),
+    ("code_symbols", check_code_symbols),
     ("unique_id", check_unique_ids),
     ("sources", check_sources),
     ("external_isolation", check_external_isolation),
@@ -291,7 +350,7 @@ class CheckReport:
                f"{len(self.errors)} 个错误、{len(self.warnings)} 个警告"]
         out.extend(f.line() for f in self.findings)
         if self.clean and not self.warnings:
-            out.append("✅ 六条校验全部通过")
+            out.append("✅ 七条校验全部通过")
         return tuple(out)
 
 

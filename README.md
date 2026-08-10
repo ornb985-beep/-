@@ -5,7 +5,7 @@
 零第三方依赖，`python3` 直接可跑。
 
 ```bash
-python -m unittest discover -s tests -v      # 423 项测试
+python -m unittest discover -s tests -v      # 432 项测试
 ```
 
 **先看这个**：[docs/v4/11-全景总纲.md](docs/v4/11-全景总纲.md) ——
@@ -128,7 +128,7 @@ for line in result.audit:
 ## 自检
 
 ```bash
-python -m unittest discover -s tests -v                # 423 项
+python -m unittest discover -s tests -v                # 全量测试
 python -m oic.scoring.kelly --selftest                 # Kelly 三重安全阀
 python -m oic.calibration.report --selftest            # Brier/Murphy/分层/代理
 python -m oic.compliance.securities_guard --selftest   # 100% 拦截 / 0 误杀

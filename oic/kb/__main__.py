@@ -1,11 +1,11 @@
 """知识库 CLI。
 
-    python -m oic.kb --check      六条校验，有 ERROR 即退出码 1
+    python -m oic.kb --check      七条校验，有 ERROR 即退出码 1
     python -m oic.kb --index      重建 INDEX.md 与 IDS.txt
     python -m oic.kb --stats      各域条目数 / 类型 / 成熟度 / 档位分布
     python -m oic.kb --find 关键词  按标题与正文搜索
     python -m oic.kb --show ID    看一条，含它的完整演化链
-    python -m oic.kb --selftest   断言六道闸真的会拦
+    python -m oic.kb --selftest   断言七道闸真的会拦
 """
 
 from __future__ import annotations

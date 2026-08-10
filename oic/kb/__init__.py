@@ -14,11 +14,11 @@
     schema.py   三轴分类 + 字段契约 + 置信档位（不给数字）
     parse.py    front-matter 解析，纯标准库
     store.py    加载全库、id 唯一性、链接图
-    check.py    六条校验，任一不过即 ERROR
+    check.py    七条校验，任一不过即 ERROR
     index.py    确定性索引生成（零时钟、零 set 迭代）
     evolve.py   supersede / falsify —— **只增不删**
 
-## 六条校验
+## 七条校验
 
     ① 无出处的条目不许存在，且仓库内路径必须真实存在
     ② 置信度不可手填，由证据等级确定性推出
@@ -26,6 +26,7 @@
     ④ 证伪不删除：falsified 必须留下推翻它的证据
     ⑤ supersede 链双向一致、不成环
     ⑥ playbook 引用必须解析得到
+    ⑦ 正文里的代码位置引用必须真实存在（重命名后不许静默失效）
 """
 
 __version__ = "1.0.0"

@@ -112,7 +112,7 @@ golden set 未建立（0 条）。
 ## 五、自检套件（零依赖，随时可跑）
 
 ```bash
-python -m unittest discover -s tests -v          # 154 项，全绿
+python -m unittest discover -s tests -v          # 全量测试（数量见 README）
 python -m unittest tests.test_reproducibility    # G0 门
 python -m oic.scoring.kelly --selftest           # Kelly 三重安全阀
 python -m oic.calibration.report --selftest      # Brier/Murphy/分层/代理
