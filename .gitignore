@@ -1,0 +1,29 @@
+# 流水线的运行状态和日志：本地的东西，不进版本库
+.loop/
+.loop-backup-*/
+
+# 密码、密钥这类东西，永远不要提交
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# 各语言的垃圾文件
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+dist/
+build/
+target/
+.DS_Store
+
+# 编辑器
+.vscode/
+.idea/
+
+# Claude Code 的本地个人设置（团队共享的是 settings.json）
+.claude/settings.local.json
