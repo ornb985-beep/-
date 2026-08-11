@@ -109,6 +109,13 @@ have_claude() { command -v "$CLAUDE_BIN" >/dev/null 2>&1; }
 
 # claude_run <提示词文件> [附加上下文文件...]
 # 把提示词和上下文拼起来丢给 claude；没装 claude 就把提示词存下来让用户手动贴。
+# 去掉说明书开头那段 --- 包起来的标注（它是给 slash command 用的）。
+# 不去掉的话，提示词以 --- 开头，会被命令行当成一个选项，直接报
+# "unknown option"——每一步都会挂。这个 bug 用假 claude 测不出来。
+strip_frontmatter() {
+  sed '1{/^---$/!q};1,/^---$/d' "$1"
+}
+
 claude_run() {
   local prompt_file="$1"; shift
   local ctx="" f
@@ -117,7 +124,7 @@ claude_run() {
   done
 
   local prompt
-  prompt="$(cat "$prompt_file")$ctx"
+  prompt="$(strip_frontmatter "$prompt_file")$ctx"
 
   mkdir -p "$LOG_DIR"
   local ts; ts="$(date +%Y%m%d-%H%M%S)"
@@ -132,9 +139,12 @@ claude_run() {
     return 3
   fi
 
+  # 提示词走标准输入，不走命令行参数。两个原因：
+  #   1. 参数里的特殊开头（比如 ---）会被当成选项
+  #   2. 上下文越堆越长，迟早撞上命令行长度上限，走标准输入没这个限制
   # --permission-mode acceptEdits：允许它直接改文件，否则每步都要你按确认，就不叫自动了
-  "$CLAUDE_BIN" -p "$prompt" --permission-mode acceptEdits 2>&1 | tee "$logf"
-  return "${PIPESTATUS[0]}"
+  printf '%s' "$prompt" | "$CLAUDE_BIN" -p --permission-mode acceptEdits 2>&1 | tee "$logf"
+  return "${PIPESTATUS[1]}"
 }
 
 # ---------- 任务清单进度 ----------

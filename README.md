@@ -144,3 +144,13 @@ MAX_FIX_TRIES=3       # 一个任务最多自动修几次
 
 需要 [Claude Code](https://claude.com/claude-code)。没装也能用——
 它会把该说的话存成文件，你复制粘贴到 Claude 里，效果一样。
+
+### 第一次用之前，先做一件事
+
+**在这个目录里先手动打开一次 Claude Code，把信任对话框点掉。**
+
+不做这一步的话，`.claude/settings.json` 里的权限设置会被整个忽略
+（它会提示 `this workspace has not been trusted`），自动循环跑起来
+可能会因为权限不够而卡住或者跑不全。
+
+这是实际跑第一次真项目时踩到的，不是理论问题。
