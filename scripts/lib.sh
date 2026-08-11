@@ -105,6 +105,16 @@ next_stage() {
 # ---------- 调用 Claude ----------
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
 
+# 每一步需要用到的工具，直接点名放行。
+#
+# 为什么要显式写出来：工作目录没被"信任"过的时候，
+# .claude/settings.json 里的权限会被【整个忽略】，
+# 于是联网搜索被挡 → 第2步查不了资料 → 整条 loop 卡死在这儿。
+# 这是第一次真跑时的实际死因，不是理论问题。
+#
+# 显式放行比依赖信任开关好：别人 clone 走这个模板，不用改自己的全局配置就能跑。
+LOOP_ALLOWED_TOOLS="${LOOP_ALLOWED_TOOLS:-WebSearch WebFetch Read Write Edit Glob Grep TodoWrite Bash}"
+
 have_claude() { command -v "$CLAUDE_BIN" >/dev/null 2>&1; }
 
 # claude_run <提示词文件> [附加上下文文件...]
@@ -143,7 +153,10 @@ claude_run() {
   #   1. 参数里的特殊开头（比如 ---）会被当成选项
   #   2. 上下文越堆越长，迟早撞上命令行长度上限，走标准输入没这个限制
   # --permission-mode acceptEdits：允许它直接改文件，否则每步都要你按确认，就不叫自动了
-  printf '%s' "$prompt" | "$CLAUDE_BIN" -p --permission-mode acceptEdits 2>&1 | tee "$logf"
+  # shellcheck disable=SC2086
+  printf '%s' "$prompt" | "$CLAUDE_BIN" -p \
+      --permission-mode acceptEdits \
+      --allowedTools $LOOP_ALLOWED_TOOLS 2>&1 | tee "$logf"
   return "${PIPESTATUS[1]}"
 }
 
