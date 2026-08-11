@@ -47,11 +47,27 @@ run_stage() {
     die "这一步没跑成功（退出码 $rc）。日志在 .loop/log/ 里，可以直接把日志贴给我看。"
   fi
 
+  # 「跑过」不等于「跑成了」。
+  # claude 可能正常退出（退出码 0），但因为查不了资料、权限不够等原因
+  # 根本没产出该产出的东西。这时候如果照样标记成功、照样往下走，
+  # 后面每一步都会建立在空气上——而且每步看着都是 ✓。
+  # 所以：该产出的文件不在，就是没做成，停下。
   local doc; doc="$(stage_doc "$stage")"
   if [ -n "$doc" ] && [ ! -f "$doc" ]; then
-    warn "这一步应该产出 $doc，但没找到。可能是它写到别的地方了，去 docs/ 翻一下。"
+    rule
+    warn "这一步没有产出 $(basename "$doc")，按「没做成」处理，不往下走。"
+    say ""
+    if [ -f "$DOC_DIR/05-我不懂的.md" ]; then
+      say "它把卡在哪写下来了，先看这个：${C_BOLD}docs/05-我不懂的.md${C_OFF}"
+      say "里面通常有一道选择题，你选完再跑 ./loop.sh go 继续。"
+    else
+      say "日志在 .loop/log/ 里，最新那个就是。可以直接把它贴给我看。"
+    fi
+    rule
+    return 1
   fi
-  state_set "ran_$stage" yes    # 明确记下"这一步真的跑过了"
+
+  state_set "ran_$stage" yes    # 到这儿才算真的跑成了
   return 0
 }
 
@@ -238,6 +254,9 @@ cmd_go() {
   local rc=0
   run_stage "$stage" || rc=$?
   [ "$rc" -eq 3 ] && return 0     # 没装 claude，已经提示手动执行了
+  # 这一步没做成（比如查不了资料、没产出该产出的文件）就停在这儿。
+  # 不停的话，后面每一步都建立在空气上，而且每步看着都是 ✓。
+  [ "$rc" -ne 0 ] && return "$rc"
 
   if stage_needs_signoff "$stage"; then
     signoff_gate "$stage"
