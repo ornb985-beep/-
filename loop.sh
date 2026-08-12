@@ -165,6 +165,25 @@ run_build_loop() {
     fi
 
     local task; task="$(next_task)"
+
+    # 轮到只有你能干的任务，就停下来交给你，别派 AI 去替你猜。
+    # 白跑一次不只是浪费额度，更糟的是它问出来的问题会掉进日志里没人看见。
+    if task_is_human_gated "$task"; then
+      rule
+      title "轮到你了 —— 这条 AI 干不了，只有你能干"
+      say ""
+      next_task_block
+      say ""
+      rule
+      say "干完之后，去 ${C_BOLD}docs/07-任务清单.md${C_OFF} 把这条前面的 ${C_BOLD}[ ]${C_OFF} 改成 ${C_BOLD}[x]${C_OFF}，"
+      say "再跑 ${C_BOLD}./loop.sh go${C_OFF}，它会自己接着往下做。"
+      say ""
+      local gated; gated="$(tasks_human_gated)"
+      say "${C_DIM}还剩 $open 个任务，其中 $gated 个是这样需要你本人的，其余 $((open-gated)) 个它自己能做。${C_OFF}"
+      rule
+      return 2   # 2 = 在等你，不是出错了
+    fi
+
     printf '\n%s[第 %s 轮]%s 正在做：%s\n' "$C_BOLD" "$round" "$C_OFF" "$task"
 
     # 1) 做
@@ -212,7 +231,13 @@ run_build_loop() {
     # 3) 确认它真把任务勾掉了，没勾就是没进展，避免死循环
     local still; still="$(tasks_open)"
     if [ "$still" -ge "$open" ]; then
-      warn "检查过了但任务清单没变化，可能它忘了勾。手动去 docs/07-任务清单.md 勾掉「$task」再继续。"
+      warn "检查过了但任务清单没变化。"
+      say  "卡住的任务：$task"
+      say  ""
+      say  "两种可能，先看一眼最新日志（.loop/log/ 里最新那个）再定："
+      say  "  1. 它确实做完了只是忘了勾 → 手动在 docs/07-任务清单.md 里勾掉，再 ./loop.sh go"
+      say  "  2. 这条其实得你本人来（它在日志里问了你问题） → 你答完再勾"
+      say  "     顺手在这条任务前面加上「【需要你回答】」，以后就会直接停下来问你，不会白跑一趟"
       return 1
     fi
 
