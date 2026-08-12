@@ -402,6 +402,46 @@ cmd_explain() {
   claude_run "$CMD_DIR/explain.md" "${ctx[@]+"${ctx[@]}"}" || true
 }
 
+# 花了多少钱、哪一步最贵
+#
+# 这个命令存在的理由很具体：这套东西两次撞上额度上限、白烧 5 次重试，
+# 而在此之前它对自己花了多少钱零可见性。撞上限那一刻才知道，已经晚了。
+cmd_cost() {
+  if [ ! -f "$COST_LOG" ]; then
+    title "还没有花钱记录"
+    if [ -z "$(json_parser)" ]; then
+      warn "这台机器上没有 jq 也没有 python3，记不了账。"
+      say  "不影响跑，只是看不到花了多少。装其中一个就能记。"
+    else
+      say "跑过 ./loop.sh go 之后就会有。"
+    fi
+    return 0
+  fi
+
+  title "花了多少钱"
+
+  # 总账
+  awk -F'\t' 'NR>1 && $3!="" { total += $3; secs += $4; n++ }
+    END {
+      if (n == 0) { print "  还没有有效记录"; exit }
+      printf "  一共 %d 次调用，花了 $%.2f，用时 %d 分钟，平均一次 $%.2f\n", n, total, secs/60, total/n
+    }' "$COST_LOG"
+
+  # 分项，按花得多的排前面。排序只作用在数据行，别把表头也排进去。
+  say ""
+  printf '  %-22s %9s %6s %10s\n' "哪一步" "花了" "次数" "平均一次"
+  awk -F'\t' 'NR>1 && $3!="" { cost[$2] += $3; cnt[$2]++ }
+    END { for (k in cost) printf "%.4f\t%s\t%d\n", cost[k], k, cnt[k] }' "$COST_LOG" \
+  | sort -rn \
+  | awk -F'\t' '{ printf "  %-22s %8.2f %6d %10.2f\n", $2, $1, $3, $1/$3 }'
+
+  say ""
+  # 跟目标预算对一下——光看花了多少没用，要看占预算多少
+  local budget; budget="$(grep -oE '¥?[0-9]+ *元?/ *月|每月[^0-9]*[0-9]+' "$DOC_DIR/00-目标.md" 2>/dev/null | head -1)"
+  [ -n "$budget" ] && say "${C_DIM}你在 00-目标.md 里写的预算：$budget${C_OFF}"
+  say "${C_DIM}明细：${COST_LOG#"$ROOT/"}${C_OFF}"
+}
+
 # 看看现在都有哪些角色，各自聊过几次
 cmd_roles() {
   local rs; rs="$(roles_list)"
@@ -441,11 +481,10 @@ cmd_ask() {
   say "${C_DIM}$question${C_OFF}"
   rule
 
-  local ctx=() s d
-  for s in "${STAGES[@]}"; do
-    d="$(stage_doc "$s")"
-    [ -n "$d" ] && [ -f "$d" ] && ctx+=("$d")
-  done
+  # 只给这个角色该看的那几份，不是全塞。
+  # 全塞的代价实测过：问一句话 $2.76，因为 8 份文档每次重新载入。
+  local ctx=(); local d
+  while IFS= read -r d; do [ -n "$d" ] && ctx+=("$d"); done < <(role_context "$role")
 
   local rc=0
   ask_role "$role" "$question" "${ctx[@]+"${ctx[@]}"}" || rc=$?
@@ -582,6 +621,7 @@ cmd_help() {
   ./loop.sh status               看进度
   ./loop.sh today                每天用：今天做哪 3 件事，顺便看这周到底动了没有
   ./loop.sh ceo                  内置操盘手：看数、拍板、组队、问一句还到不到得了目标
+  ./loop.sh cost                 花了多少钱、哪一步最贵
   ./loop.sh roles                看看现在有哪些角色，各自聊过几次
   ./loop.sh ask <角色> "问题"     单独问某个人。每个人有自己的对话线程，接着上次聊
   ./loop.sh explain              用大白话讲一遍现在什么情况
@@ -621,6 +661,7 @@ main() {
     go|next|continue) cmd_go ;;
     status|st) cmd_status ;;
     ceo|操盘) cmd_ceo ;;
+    cost|花钱|账) cmd_cost ;;
     roles|角色) cmd_roles ;;
     ask|问)  cmd_ask "${1:-}" "${2:-}" ;;
     today|daily|今天) cmd_daily ;;

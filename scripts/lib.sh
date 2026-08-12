@@ -145,6 +145,47 @@ LOOP_ALLOWED_TOOLS="${LOOP_ALLOWED_TOOLS:-WebSearch WebFetch Read Write Edit Glo
 
 have_claude() { command -v "$CLAUDE_BIN" >/dev/null 2>&1; }
 
+# ---------- 花了多少钱 ----------
+#
+# 为什么要记这个：这套东西两次撞上额度上限、白烧 5 次重试，
+# 而在此之前它对自己花了多少钱【零可见性】。
+# 更要命的是不均匀——实测一句"说好"就花了 $1.17，
+# 因为整个项目上下文每次都要重新载进去。
+# 不记账的话，你只会在撞上限的那一刻才知道，而那时候已经晚了。
+COST_LOG="$STATE_DIR/cost.tsv"
+
+# 解析 JSON 用什么。两个都没有就退回纯文本模式，不记账但照常能跑——
+# 这是模板，不能因为别人机器上没装 jq 就不能用。
+json_parser() {
+  if command -v jq >/dev/null 2>&1; then echo jq
+  elif command -v python3 >/dev/null 2>&1; then echo python3
+  else echo ""; fi
+}
+
+# json_field <json文件> <字段名> —— 取一个顶层字段，取不到返回空
+json_field() {
+  local f="$1" k="$2"
+  case "$(json_parser)" in
+    jq)      jq -r --arg k "$k" '.[$k] // empty' < "$f" 2>/dev/null ;;
+    python3) python3 -c "
+import json,sys
+try:
+    v=json.load(open(sys.argv[1])).get(sys.argv[2])
+    if v is not None: print(v)
+except Exception: pass
+" "$f" "$k" 2>/dev/null ;;
+    *) : ;;
+  esac
+}
+
+cost_record() {
+  local what="$1" cost="$2" ms="$3"
+  mkdir -p "$STATE_DIR"
+  [ -f "$COST_LOG" ] || printf '时间\t干什么\t花了(美元)\t用时(秒)\n' > "$COST_LOG"
+  printf '%s\t%s\t%s\t%s\n' \
+    "$(date '+%Y-%m-%d %H:%M')" "$what" "${cost:-0}" "$(( ${ms:-0} / 1000 ))" >> "$COST_LOG"
+}
+
 # ---------- 角色（操盘手 / 专家 / CEO 招的人）----------
 #
 # 每个角色是一个独立的对话线程：自己的会话、自己的日志、自己的记录。
@@ -178,6 +219,24 @@ roles_list() {
 
 role_file()    { echo "$ROLE_DIR/$1.md"; }
 role_session() { echo "$ROLE_DIR/$1.session"; }
+
+# 这个角色要看哪几份文档。
+#
+# 为什么不能全塞：实测问一个只管获客的角色一句话，花了 $2.76、81 秒——
+# 因为把全部 8 份文档都塞给它了，包括跟它完全无关的「技术与落地」。
+# 角色分工的意义是各看各的那一块，全塞进去等于分工白分。
+#
+# 角色定义文件里可以写一行「上下文：00-目标.md 02-共性与独特.md」来指定；
+# 不写就用默认的三份（要什么 / 凭什么是我们 / 什么算好），够绝大多数角色用。
+role_context() {
+  local rf; rf="$(role_file "$1")"
+  local line; line="$(grep -m1 -E '^上下文[:：]' "$rf" 2>/dev/null | sed -E 's/^上下文[:：][[:space:]]*//')"
+  [ -z "$line" ] && line="00-目标.md 02-共性与独特.md 03-什么算好.md"
+  local f
+  for f in $line; do
+    [ -f "$DOC_DIR/$f" ] && printf '%s\n' "$DOC_DIR/$f"
+  done
+}
 
 # 最近一次调用的日志路径，claude_run 里赋值
 LAST_LOG=""
@@ -242,6 +301,29 @@ claude_run() {
   #   1. 参数里的特殊开头（比如 ---）会被当成选项
   #   2. 上下文越堆越长，迟早撞上命令行长度上限，走标准输入没这个限制
   # --permission-mode acceptEdits：允许它直接改文件，否则每步都要你按确认，就不叫自动了
+  local what; what="${LOG_SUBDIR:-$(basename "$prompt_file" .md)}"
+
+  # 能解析 JSON 就走 json 模式，顺手把花了多少钱记下来；
+  # 解析不了就退回纯文本，照常能跑，只是没有账。
+  if [ -n "$(json_parser)" ]; then
+    local raw="$logf.json"
+    # shellcheck disable=SC2086
+    printf '%s' "$prompt" | "$CLAUDE_BIN" -p \
+        ${CLAUDE_EXTRA_ARGS[@]+"${CLAUDE_EXTRA_ARGS[@]}"} \
+        --output-format json \
+        --permission-mode acceptEdits \
+        --allowedTools $LOOP_ALLOWED_TOOLS > "$raw" 2>"$logf.err"
+    local rc="$?"
+
+    # 正文照样打出来给人看，别为了记账就把人能看的东西弄没了
+    local text; text="$(json_field "$raw" result)"
+    if [ -n "$text" ]; then printf '%s\n' "$text" | tee "$logf"
+    else cat "$logf.err" 2>/dev/null | tee "$logf"; fi
+
+    cost_record "$what" "$(json_field "$raw" total_cost_usd)" "$(json_field "$raw" duration_ms)"
+    return "$rc"
+  fi
+
   # shellcheck disable=SC2086
   printf '%s' "$prompt" | "$CLAUDE_BIN" -p \
       ${CLAUDE_EXTRA_ARGS[@]+"${CLAUDE_EXTRA_ARGS[@]}"} \
