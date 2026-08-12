@@ -402,6 +402,24 @@ cmd_explain() {
   claude_run "$CMD_DIR/explain.md" "${ctx[@]+"${ctx[@]}"}" || true
 }
 
+# 每天用：今天做哪几件事，顺便看昨天到底动了没有
+#
+# 为什么要有这个命令：清单排完之后最常见的死法不是做错，是没做。
+# 每天都很忙，一个月过去清单上一个钩都没多，而且这个死法从内部完全看不出来——
+# 每天都在推进感里，只有把日子摊开数钩才看得见。
+cmd_daily() {
+  [ -f "$CMD_DIR/daily.md" ] || die "缺少 .claude/commands/daily.md"
+  [ -f "$TASKS_FILE" ] || die "还没有任务清单，先把九步跑到第8步（./loop.sh go）"
+
+  local ctx=()
+  [ -f "$DOC_DIR/00-目标.md" ]    && ctx+=("$DOC_DIR/00-目标.md")
+  [ -f "$STANDARDS_FILE" ]        && ctx+=("$STANDARDS_FILE")
+  ctx+=("$TASKS_FILE")
+  [ -f "$DOC_DIR/08-每天.md" ]    && ctx+=("$DOC_DIR/08-每天.md")
+
+  claude_run "$CMD_DIR/daily.md" "${ctx[@]}" || true
+}
+
 # 帮我判断：拿当前这一步的产出，逼问一遍，给出选择题
 cmd_judge() {
   [ -f "$CMD_DIR/judge.md" ] || die "缺少 .claude/commands/judge.md"
@@ -467,6 +485,7 @@ cmd_help() {
   ./loop.sh start "你想做什么"   开始（一句话说清就行，不用想得多完整）
   ./loop.sh go                   继续往下跑
   ./loop.sh status               看进度
+  ./loop.sh today                每天用：今天做哪 3 件事，顺便看这周到底动了没有
   ./loop.sh explain              用大白话讲一遍现在什么情况
 
   ./loop.sh judge                它给了个东西，我不知道好不好 → 它逼问自己，给你选择题
@@ -503,6 +522,7 @@ main() {
     start)   cmd_start "${1:-}" ;;
     go|next|continue) cmd_go ;;
     status|st) cmd_status ;;
+    today|daily|今天) cmd_daily ;;
     explain|讲讲) cmd_explain ;;
     judge|判断) cmd_judge ;;
     correct|纠错) cmd_correct ;;
