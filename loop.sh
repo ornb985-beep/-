@@ -151,7 +151,8 @@ run_build_loop() {
 
   local round=0
   while :; do
-    local open done_before; open="$(tasks_open)"; done_before="$(tasks_done)"
+    local open done_before rev_before
+    open="$(tasks_open)"; done_before="$(tasks_done)"; rev_before="$(revisions_count)"
     if [ "$open" -eq 0 ]; then
       ok "任务清单全部勾完了。"
       return 0
@@ -245,6 +246,29 @@ run_build_loop() {
       say  "  2. 这条其实得你本人来（它在日志里问了你问题） → 你答完再勾"
       say  "     顺手在这条任务前面加上「【需要你回答】」，以后就会直接停下来问你，不会白跑一趟"
       return 1
+    fi
+
+    # 4) 双回路转了没有。
+    #
+    # 见了实物就必须回头问一句「有没有哪条标准要改」——这是这套东西
+    # 跟同类工具唯一的区别，也是「像人一样复盘迭代」这句话的落地。
+    # 只更新东西、不更新标准的系统，会非常高效地跑向一个错的地方，
+    # 而且每一步验收都通过。所以这一条和「任务有没有勾掉」一样是硬检查。
+    if [ -f "$STANDARDS_FILE" ]; then
+      local rev_after; rev_after="$(revisions_count)"
+      if [ "$rev_after" -le "$rev_before" ]; then
+        rule
+        warn "这一轮没有回头看标准，不算跑完整。"
+        say  "做完一个任务、见到真东西之后，必须回答一句：${C_BOLD}有没有哪条标准要改？${C_OFF}"
+        say  ""
+        say  "去 ${C_BOLD}docs/03-什么算好.md${C_OFF} 末尾的「标准修订记录」补一行——"
+        say  "  改了 → 记：原来那条是什么、改成什么、为什么"
+        say  "  没改 → 也记一行「看过，没改」，${C_DIM}空着才是问题${C_OFF}"
+        say  ""
+        say  "补完再跑 ${C_BOLD}./loop.sh go${C_OFF} 继续。"
+        rule
+        return 1
+      fi
     fi
 
     local still; still="$(tasks_open)"
