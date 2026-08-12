@@ -178,6 +178,39 @@ except Exception: pass
   esac
 }
 
+cost_total() {
+  [ -f "$COST_LOG" ] || { echo 0; return; }
+  awk -F'\t' 'NR>1 && $3!="" { t += $3 } END { printf "%.2f", t+0 }' "$COST_LOG"
+}
+
+# 预算闸门。
+#
+# 为什么必须有：实测一次调用 $0.68~$8.20。
+# 没有闸门就开无人值守，等于装了个不封顶的水龙头——
+# 一晚上能烧掉几百刀，而你睡着了。
+#
+# 闸门只拦「还没花的」，不会把已经花的退回来，所以要设在你真能接受的数上。
+budget_get() { state_get budget "${LOOP_BUDGET:-}"; }
+
+# 还能不能再花。能就返回 0，不能就打印原因并返回 1。
+budget_ok() {
+  local b; b="$(budget_get)"
+  [ -z "$b" ] && return 0            # 没设预算就不拦，但 auto 模式会强制要求设
+  local spent; spent="$(cost_total)"
+  # 用 awk 比大小，bash 不会算小数
+  if awk -v s="$spent" -v b="$b" 'BEGIN{exit !(s>=b)}'; then
+    rule
+    warn "到预算上限了，停下。"
+    say  "  已经花了 \$$spent，你设的上限是 \$$b。"
+    say  ""
+    say  "想继续就调高上限：${C_BOLD}./loop.sh budget <新的数>${C_OFF}"
+    say  "先看看钱花哪了：${C_BOLD}./loop.sh cost${C_OFF}"
+    rule
+    return 1
+  fi
+  return 0
+}
+
 cost_record() {
   local what="$1" cost="$2" ms="$3"
   mkdir -p "$STATE_DIR"
@@ -267,6 +300,21 @@ roles_list() {
 role_file()    { echo "$ROLE_DIR/$1.md"; }
 role_session() { echo "$ROLE_DIR/$1.session"; }
 
+# 这个角色用哪个模型。
+#
+# 这就是「以后接便宜 AI」的接口：在角色定义里写一行
+#   模型：sonnet
+# 就行。客服分拣、竞品巡查这种活用便宜的；
+# CEO 裁决、风控反证这种活用最强的——**判断力省不得，体力活可以省。**
+#
+# 要接非官方的便宜服务，在 .loop/roles/<名字>.env 里写 endpoint 和 key，
+# 那个文件会在调用这个角色时被 source 进去，只影响他一个人。
+role_model() {
+  local rf; rf="$(role_file "$1")"
+  grep -m1 -E '^模型(:|：)' "$rf" 2>/dev/null | sed -E 's/^模型(:|：)[[:space:]]*//' || true
+}
+role_env() { echo "$ROLE_DIR/$1.env"; }
+
 # 这个角色要看哪几份文档。
 #
 # 为什么不能全塞：实测问一个只管获客的角色一句话，花了 $2.76、81 秒——
@@ -277,7 +325,7 @@ role_session() { echo "$ROLE_DIR/$1.session"; }
 # 不写就用默认的三份（要什么 / 凭什么是我们 / 什么算好），够绝大多数角色用。
 role_context() {
   local rf; rf="$(role_file "$1")"
-  local line; line="$(grep -m1 -E '^上下文[:：]' "$rf" 2>/dev/null | sed -E 's/^上下文[:：][[:space:]]*//')"
+  local line; line="$(grep -m1 -E '^上下文(:|：)' "$rf" 2>/dev/null | sed -E 's/^上下文(:|：)[[:space:]]*//')"
   [ -z "$line" ] && line="00-目标.md 02-共性与独特.md 03-什么算好.md"
   local f
   for f in $line; do
@@ -334,6 +382,9 @@ claude_run() {
   local ts; ts="$(date +%Y%m%d-%H%M%S)"
   local logf="$dir/$ts-$(basename "$prompt_file" .md).log"
   LAST_LOG="$logf"   # 出事的时候要回头翻这个日志，见 blocker_reason
+
+  # 花钱之前先过预算闸门
+  budget_ok || return 4
 
   if ! have_claude; then
     local dump="$STATE_DIR/待手动执行.txt"
@@ -412,6 +463,19 @@ ask_role() {
     printf '%s' "$uuid" > "$sf"
     CLAUDE_EXTRA_ARGS=(--session-id "$uuid")
     { cat "$rf"; printf '\n\n---- 现在问你这件事 ----\n%s\n' "$question"; } > "$tmp"
+  fi
+
+  # 这个角色自己的模型（写在角色定义里的「模型：xxx」）
+  local m; m="$(role_model "$role")"
+  [ -n "$m" ] && CLAUDE_EXTRA_ARGS+=(--model "$m")
+
+  # 这个角色自己的环境变量（接别家便宜服务就写这儿），只影响他一个人
+  local ef; ef="$(role_env "$role")"
+  if [ -f "$ef" ]; then
+    # shellcheck disable=SC1090
+    ( set -a; . "$ef"; set +a
+      LOG_SUBDIR="roles/$role" claude_run "$tmp" "$@" )
+    return $?
   fi
 
   LOG_SUBDIR="roles/$role" claude_run "$tmp" "$@"

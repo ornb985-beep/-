@@ -308,6 +308,13 @@ EOF
 }
 
 cmd_go() {
+  # 结项之后就不往下跑了。没有出口的止损线，人会一直答"还没到"。
+  if [ "$(state_get closed no)" = "yes" ]; then
+    warn "这个项目已经结项了，复盘在 docs/99-结项.md。"
+    say  "真要重开：${C_BOLD}./loop.sh reset${C_OFF}（会先自动备份）"
+    return 1
+  fi
+
   local stage; stage="$(state_get stage goal)"
 
   if [ "$stage" = "done" ]; then
@@ -400,6 +407,122 @@ cmd_explain() {
   done
   [ -f "$STATE_DIR/last-check.txt" ] && ctx+=("$STATE_DIR/last-check.txt")
   claude_run "$CMD_DIR/explain.md" "${ctx[@]+"${ctx[@]}"}" || true
+}
+
+# 设/看预算上限
+cmd_budget() {
+  local v="${1:-}"
+  if [ -z "$v" ]; then
+    local b; b="$(budget_get)"
+    title "预算"
+    if [ -z "$b" ]; then
+      say "还没设上限。${C_DIM}没上限的话 ./loop.sh auto 不会启动——那等于装个不封顶的水龙头。${C_OFF}"
+    else
+      say "上限 \$$b，已经花了 \$$(cost_total)"
+    fi
+    say ""
+    say "设上限：${C_BOLD}./loop.sh budget 50${C_OFF}（单位是美元）"
+    return 0
+  fi
+  case "$v" in ''|*[!0-9.]*) die "预算要写数字，比如 ./loop.sh budget 50" ;; esac
+  state_set budget "$v"
+  ok "预算上限设成 \$$v（已经花了 \$$(cost_total)）"
+}
+
+# 无人值守：自己一直往下跑，撞到闸门/预算/卡点就停。
+#
+# 为什么必须先有预算才让跑：实测一次调用 $0.68~$8.20。
+# 没有上限的自动循环，是一个你睡着之后还在花钱的东西。
+cmd_auto() {
+  local b; b="$(budget_get)"
+  if [ -z "$b" ]; then
+    rule
+    warn "还没设预算上限，不给跑自动。"
+    say  "实测一次调用 \$0.68~\$8.20。没上限的无人值守，等于装了个不封顶的水龙头——"
+    say  "你睡着了它还在花钱。"
+    say  ""
+    say  "先设一个你真能接受的数：${C_BOLD}./loop.sh budget 50${C_OFF}"
+    rule
+    return 1
+  fi
+
+  local start; start="$(cost_total)"
+  title "无人值守开始"
+  say "${C_DIM}预算上限 \$$b，已花 \$$start。撞到下面任何一条就停：${C_OFF}"
+  say "${C_DIM}  预算到顶 ／ 轮到你拍板 ／ 轮到你干活 ／ 卡住了 ／ 全部做完${C_OFF}"
+  rule
+
+  local prev="" cur rc n=0
+  while :; do
+    n=$((n+1))
+    [ "$n" -gt "${LOOP_AUTO_MAX:-40}" ] && { warn "跑了 $((n-1)) 轮，先停下喘口气。"; break; }
+
+    budget_ok || break
+    cur="$(state_get stage goal)"
+    [ "$cur" = "done" ] && { ok "全部做完了。"; break; }
+
+    rc=0; cmd_go || rc=$?
+    local now; now="$(state_get stage goal)"
+
+    case "$rc" in
+      2) rule; info "停在这儿等你——上面写了要你做什么。"; break ;;
+      3) break ;;
+      0) : ;;
+      *) rule; warn "卡住了，停下（退出码 $rc）。"; break ;;
+    esac
+
+    # 阶段没动、上一轮也没动 → 空转，别烧钱
+    if [ "$now" = "$cur" ] && [ "$cur" = "$prev" ]; then
+      warn "连着两轮卡在同一步没动，停下，不空转。"
+      break
+    fi
+    prev="$cur"
+  done
+
+  rule
+  local endc; endc="$(cost_total)"
+  title "这一轮无人值守结束"
+  say "  跑了 $n 轮，花了 \$$(awk -v a="$endc" -v s="$start" 'BEGIN{printf "%.2f", a-s}')（累计 \$$endc / 上限 \$$b）"
+  say "  现在在：$(stage_label "$(state_get stage goal)")"
+}
+
+# 结项：这个项目到头了——不管是做成了，还是该停了。
+#
+# 为什么要有这个：止损线每次都在问「到了吗」，但「到了」之后没有出口。
+# 没有出口的止损线，人会一直答"还没到"。
+cmd_close() {
+  local doc="$DOC_DIR/99-结项.md"
+  [ -f "$doc" ] && { warn "已经结过项了：${doc#"$ROOT/"}"; return 0; }
+  [ -f "$CMD_DIR/close.md" ] || die "缺少 .claude/commands/close.md"
+
+  rule
+  title "结项"
+  say "这会把这个项目封存，并且写一份诚实的复盘："
+  say "  ${C_BOLD}做成了没有 ／ 花了多少 ／ 为什么到这儿为止 ／ 下次不再犯的是什么${C_OFF}"
+  say ""
+  say "${C_DIM}封存之后 go / auto 都不会再往下跑。想重开就 ./loop.sh reset。${C_OFF}"
+  rule
+
+  local ctx=() s d
+  for s in "${STAGES[@]}"; do
+    d="$(stage_doc "$s")"; [ -n "$d" ] && [ -f "$d" ] && ctx+=("$d")
+  done
+  [ -f "$GROUP_CHAT" ] && ctx+=("$GROUP_CHAT")
+  [ -f "$DOC_DIR/09-操盘记录.md" ] && ctx+=("$DOC_DIR/09-操盘记录.md")
+  [ -f "$COST_LOG" ] && ctx+=("$COST_LOG")
+
+  claude_run "$CMD_DIR/close.md" "${ctx[@]+"${ctx[@]}"}" || true
+
+  if [ -f "$doc" ]; then
+    state_set closed yes
+    group_say "系统" "项目已结项。复盘写在 docs/99-结项.md。"
+    rule
+    ok "结项了。复盘在 ${C_BOLD}${doc#"$ROOT/"}${C_OFF}"
+    say "${C_DIM}那份复盘值得过半年再看一遍——教训的保质期比结论长。${C_OFF}"
+  else
+    warn "没有产出 99-结项.md，按没结成处理，项目还开着。"
+    return 1
+  fi
 }
 
 # 从模板招一批人进来。不写名字就列出有哪些可招。
@@ -659,6 +782,8 @@ cmd_help() {
   ./loop.sh status               看进度
   ./loop.sh today                每天用：今天做哪 3 件事，顺便看这周到底动了没有
   ./loop.sh ceo                  内置操盘手：看数、拍板、组队、问一句还到不到得了目标
+  ./loop.sh budget 50            设花钱上限（美元）。不设就不给跑自动
+  ./loop.sh auto                 无人值守：自己往下跑，撞到闸门/预算/卡点就停
   ./loop.sh hire [名字...]       从模板招人（不写名字就看有哪些可招）
   ./loop.sh say "话"             在群里说一句，所有角色下次开口前都会看到
   ./loop.sh cost                 花了多少钱、哪一步最贵
@@ -670,6 +795,7 @@ cmd_help() {
   ./loop.sh correct              感觉哪儿不对 → 先查错在哪一层，再决定怎么改
 
   ./loop.sh back                 上一步方向就不对，退回去重做
+  ./loop.sh close                结项：封存 + 写一份诚实的复盘
   ./loop.sh reset                全部清空重来（先自动备份）
 
 九步流程：
@@ -701,6 +827,9 @@ main() {
     go|next|continue) cmd_go ;;
     status|st) cmd_status ;;
     ceo|操盘) cmd_ceo ;;
+    auto|自动) cmd_auto ;;
+    budget|预算) cmd_budget "${1:-}" ;;
+    close|结项) cmd_close ;;
     hire|招人) shift 0; cmd_hire "$@" ;;
     say|说) cmd_say "${1:-}" ;;
     cost|花钱|账) cmd_cost ;;
