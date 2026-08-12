@@ -31,16 +31,45 @@ run() {
 # 只在命令存在时才跑，避免因为没装某个工具就误判为"代码有问题"
 has() { command -v "$1" >/dev/null 2>&1; }
 
+# 「本来该检查、但没能检查」要记下来，最后一起说。
+# 不记的话就会出现最坏的情况：什么都没验，屏幕上却写着"全部通过"。
+SKIPPED=()
+skip() { SKIPPED+=("$1"); }
+
 # ---------------- Python ----------------
-if [ -f pyproject.toml ] || [ -f requirements.txt ] || compgen -G "*.py" >/dev/null 2>&1; then
+# 找 .py 要往下翻子目录。只看根目录的话，代码放在 src/ 里就完全看不见——
+# 真跑的时候就是这样：src/unread.py + tests/test_unread.py 都在，
+# check.sh 一个 Python 检查都没跑，还报了"全部通过"。
+has_py=0
+[ -f pyproject.toml ] || [ -f requirements.txt ] && has_py=1
+if [ "$has_py" = 0 ] && [ -n "$(find . -name '*.py' -not -path '*/.*' -not -path '*/node_modules/*' -print -quit 2>/dev/null)" ]; then
+  has_py=1
+fi
+
+if [ "$has_py" = 1 ]; then
   if has uv && [ -f pyproject.toml ]; then
-    has_pytest=$(uv run python -c "import pytest" 2>/dev/null && echo 1 || echo 0)
-    [ "$has_pytest" = 1 ] && run "Python 测试 (pytest)" uv run pytest -q
+    if uv run python -c "import pytest" 2>/dev/null; then
+      run "Python 测试 (pytest)" uv run pytest -q
+    else
+      skip "Python 测试：没装 pytest（uv 环境里），测试没跑"
+    fi
     uv run ruff --version >/dev/null 2>&1 && run "Python 代码规范 (ruff)" uv run ruff check .
+  elif has pytest; then
+    # 让 pytest 自己去找测试，别写死只看 tests/ 目录。
+    # 退出码 5 = 一个测试都没收集到，那是"没测试可跑"，不是"测试挂了"。
+    pytest -q; rc=$?
+    RAN=$((RAN+1))
+    printf '\n=== %s ===\n$ %s\n' "Python 测试 (pytest)" "pytest -q"
+    case "$rc" in
+      0) printf '[通过] Python 测试 (pytest)\n' ;;
+      5) printf '[跳过] 有 Python 代码，但一个测试都没找到\n'
+         RAN=$((RAN-1)); skip "Python 测试：有 .py 文件但没有任何测试，等于没验" ;;
+      *) printf '[失败] Python 测试 (pytest)\n'; FAILED=1 ;;
+    esac
   else
-    has pytest && [ -d tests ] && run "Python 测试 (pytest)" pytest -q
-    has ruff && run "Python 代码规范 (ruff)" ruff check .
+    skip "Python 测试：这台机器上没有 pytest 命令，测试没跑"
   fi
+  has ruff && run "Python 代码规范 (ruff)" ruff check .
 fi
 
 # ---------------- Node / TypeScript ----------------
@@ -113,6 +142,15 @@ fi
 
 # ---------------- 汇总 ----------------
 printf '\n────────────────────────────\n'
+
+# 先说没检查成的。「全部通过」如果底下压着一堆没跑的检查，
+# 那是最坏的一种假象——比直接失败还危险，因为你会以为它验过了。
+if [ "${#SKIPPED[@]}" -gt 0 ]; then
+  printf '注意，下面这些本来该检查、但没检查成：\n'
+  for s in "${SKIPPED[@]}"; do printf '  · %s\n' "$s"; done
+  printf '\n'
+fi
+
 if [ "$RAN" -eq 0 ]; then
   printf '还没有任何可跑的检查（项目里还没有测试）。\n'
   printf '这不算失败，但等有代码了就该补测试了——没有测试，自动循环就没法判断做对没有。\n'

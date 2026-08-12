@@ -188,16 +188,26 @@ claude_run() {
 # ---------- 任务清单进度 ----------
 # grep -c 在"无匹配"时会输出 0 但返回码非 0，在"文件不存在"时什么都不输出，
 # 所以统一兜底成 0，避免后面做算术时炸掉。
+
+# 任务清单末尾有一节「怎么验收这一步」，里面也是 - [ ] 格式，
+# 但那是给人对照着检查的，不是要 AI 去做的任务。
+# 不排掉的话有两个后果：①任务数虚高，进度全是假的
+# ②自动循环走到最后会真的去"做"验收项，比如
+#   「所有任务都是 - [ ] 开头的标准格式」——这条根本没法做，循环就死在这儿。
+tasks_region() {
+  awk '/^##[[:space:]]*怎么验收/ { exit } { print }' "$TASKS_FILE" 2>/dev/null
+}
+
 _count() {
   local n
-  n="$(grep -cE "$1" "$TASKS_FILE" 2>/dev/null || true)"
+  n="$(tasks_region | grep -cE "$1" 2>/dev/null || true)"
   echo "${n:-0}"
 }
 tasks_total()   { _count '^[[:space:]]*- \[[ xX]\] '; }
 tasks_done()    { _count '^[[:space:]]*- \[[xX]\] '; }
 tasks_open()    { _count '^[[:space:]]*- \[ \] '; }
 next_task() {
-  grep -m1 -E '^[[:space:]]*- \[ \] ' "$TASKS_FILE" 2>/dev/null \
+  tasks_region | grep -m1 -E '^[[:space:]]*- \[ \] ' 2>/dev/null \
     | sed -E 's/^[[:space:]]*- \[ \] //' || true
 }
 
@@ -205,12 +215,12 @@ next_task() {
 # 只拿第一行会把关键信息切掉（比如"要你回答什么"正好在第二行），
 # 所以连着续行一起取。
 next_task_block() {
-  awk '
+  tasks_region | awk '
     /^[[:space:]]*- \[ \] / && !found { found=1; print; next }
     found && /^[[:space:]]*- \[[ xX]\] / { exit }
     found && /^#/ { exit }
     found { print }
-  ' "$TASKS_FILE" 2>/dev/null | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}'
+  ' | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}'
 }
 
 # 任务清单里有两种任务，AI 干不了，只有人能干：

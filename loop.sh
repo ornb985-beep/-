@@ -151,7 +151,7 @@ run_build_loop() {
 
   local round=0
   while :; do
-    local open; open="$(tasks_open)"
+    local open done_before; open="$(tasks_open)"; done_before="$(tasks_done)"
     if [ "$open" -eq 0 ]; then
       ok "任务清单全部勾完了。"
       return 0
@@ -229,8 +229,14 @@ run_build_loop() {
     fi
 
     # 3) 确认它真把任务勾掉了，没勾就是没进展，避免死循环
-    local still; still="$(tasks_open)"
-    if [ "$still" -ge "$open" ]; then
+    #
+    # 看的是「勾掉的有没有变多」，不是「剩下的有没有变少」。
+    # 因为做任务时发现新问题、往清单里补一条，是好事，不是没进展；
+    # 按剩余数判断的话，勾掉 1 条 + 新增 1 条 = 剩余不变 = 被误判成卡住。
+    # 第一次真跑第9步就撞上了：它写完函数、勾了任务、还老实记下
+    # "check.sh 探测不到 src/ 里的代码"这个新发现，结果被报成"没变化"。
+    local done_after; done_after="$(tasks_done)"
+    if [ "$done_after" -le "$done_before" ]; then
       warn "检查过了但任务清单没变化。"
       say  "卡住的任务：$task"
       say  ""
@@ -241,7 +247,12 @@ run_build_loop() {
       return 1
     fi
 
-    ok "完成（剩 $still 个任务）"
+    local still; still="$(tasks_open)"
+    if [ "$still" -gt "$open" ]; then
+      ok "完成（剩 $still 个任务——比刚才多了，因为它顺手记下了新发现的问题）"
+    else
+      ok "完成（剩 $still 个任务）"
+    fi
   done
 }
 
