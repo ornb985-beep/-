@@ -21,6 +21,30 @@ MAX_FIX_TRIES="${MAX_FIX_TRIES:-3}"          # 单个任务测试不过，最多
 # 阶段执行
 # ============================================================
 
+# claude 跑挂了之后，统一在这儿决定「怎么跟人说」。
+#
+# 关键是分清两种失败：外面的原因（额度用完、断网）重跑没用，等就行；
+# 真做错了才需要看日志改东西。混为一谈的后果是对着上限空转——真发生过。
+# 返回 2 表示外部原因卡住（可以等），真失败直接 die。
+report_failure() {
+  local rc="$1" what="$2"
+  local b; b="$(blocker_reason "$LAST_LOG" || true)"
+  if [ -n "$b" ]; then
+    rule
+    case "${b%%$'\t'*}" in
+      quota)   warn "不是代码坏了，是 AI 的额度用完了。" ;;
+      network) warn "不是代码坏了，是连不上网。" ;;
+    esac
+    say "  它自己的原话：${C_DIM}${b#*$'\t'}${C_OFF}"
+    say ""
+    say "${C_BOLD}现在重跑没有用${C_OFF}，会得到一模一样的结果。等恢复了再跑 ${C_BOLD}./loop.sh go${C_OFF}——"
+    say "前面做完的几步不会重做，直接从卡住的这一步接着跑。"
+    rule
+    return 2
+  fi
+  die "${what}（退出码 $rc）。日志在 .loop/log/ 里，可以直接把日志贴给我看。"
+}
+
 # 跑一个非 build 阶段
 run_stage() {
   local stage="$1"
@@ -44,23 +68,8 @@ run_stage() {
   if [ "$rc" -eq 3 ]; then
     return 3   # 没装 claude，已提示手动执行
   elif [ "$rc" -ne 0 ]; then
-    # 先看看是不是外面的原因（额度用完、断网）。是的话别说成"做错了"，
-    # 也别让人白重试——重试解决不了额度问题。
-    local b; b="$(blocker_reason "$LAST_LOG" || true)"
-    if [ -n "$b" ]; then
-      rule
-      case "${b%%$'\t'*}" in
-        quota)   warn "不是代码坏了，是 AI 的额度用完了。" ;;
-        network) warn "不是代码坏了，是连不上网。" ;;
-      esac
-      say "  它自己的原话：${C_DIM}${b#*$'\t'}${C_OFF}"
-      say ""
-      say "${C_BOLD}现在重跑没有用${C_OFF}，会得到一模一样的结果。等恢复了再跑 ${C_BOLD}./loop.sh go${C_OFF}——"
-      say "前面做完的几步不会重做，直接从卡住的这一步接着跑。"
-      rule
-      return 2   # 2 = 外部原因卡住，不是这一步做错了
-    fi
-    die "这一步没跑成功（退出码 $rc）。日志在 .loop/log/ 里，可以直接把日志贴给我看。"
+    report_failure "$rc" "这一步没跑成功"
+    return $?
   fi
 
   # 「跑过」不等于「跑成了」。
@@ -162,7 +171,8 @@ run_build_loop() {
     claude_run "$CMD_DIR/build.md" \
       "$DOC_DIR/02-共性与独特.md" "$DOC_DIR/03-什么算好.md" \
       "$DOC_DIR/04-要做什么.md" "$DOC_DIR/06-技术与落地.md" "$TASKS_FILE" || {
-        local rc=$?; [ "$rc" -eq 3 ] && return 3; die "做的过程中出错了（退出码 $rc）"; }
+        local rc=$?; [ "$rc" -eq 3 ] && return 3
+        report_failure "$rc" "做的过程中出错了"; return $?; }
 
     # 2) 检查 + 修
     local try=0 passed=0
@@ -183,7 +193,8 @@ run_build_loop() {
         tail -c 8000 "$out"
       } > "$STATE_DIR/fix-prompt.md"
       claude_run "$STATE_DIR/fix-prompt.md" "$TASKS_FILE" || {
-        local rc=$?; [ "$rc" -eq 3 ] && return 3; die "修的过程中出错了（退出码 $rc）"; }
+        local rc=$?; [ "$rc" -eq 3 ] && return 3
+        report_failure "$rc" "修的过程中出错了"; return $?; }
     done
 
     if [ "$passed" -ne 1 ]; then
