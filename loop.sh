@@ -402,6 +402,28 @@ cmd_explain() {
   claude_run "$CMD_DIR/explain.md" "${ctx[@]+"${ctx[@]}"}" || true
 }
 
+# 内置操盘手：看数、裁决、组队、问责
+#
+# 跟专家席是两个角色，别混：专家各自给判断、可以互相矛盾；
+# 操盘手必须在矛盾之后拍板，并对数字负责。
+# 把选择题原样丢回去是参谋的活——这个命令要先给决定，再让人点头或推翻。
+cmd_ceo() {
+  [ -f "$CMD_DIR/ceo.md" ] || die "缺少 .claude/commands/ceo.md"
+
+  local ctx=() s d
+  for s in "${STAGES[@]}"; do
+    d="$(stage_doc "$s")"
+    [ -n "$d" ] && [ -f "$d" ] && ctx+=("$d")
+  done
+  [ -f "$DOC_DIR/08-每天.md" ]     && ctx+=("$DOC_DIR/08-每天.md")
+  [ -f "$DOC_DIR/09-操盘记录.md" ] && ctx+=("$DOC_DIR/09-操盘记录.md")
+
+  if [ "${#ctx[@]}" -eq 0 ]; then
+    die "还没有任何文档，操盘手没东西可看。先跑 ./loop.sh start \"你想做什么\""
+  fi
+  claude_run "$CMD_DIR/ceo.md" "${ctx[@]}" || true
+}
+
 # 每天用：今天做哪几件事，顺便看昨天到底动了没有
 #
 # 为什么要有这个命令：清单排完之后最常见的死法不是做错，是没做。
@@ -486,6 +508,7 @@ cmd_help() {
   ./loop.sh go                   继续往下跑
   ./loop.sh status               看进度
   ./loop.sh today                每天用：今天做哪 3 件事，顺便看这周到底动了没有
+  ./loop.sh ceo                  内置操盘手：看数、拍板、组队、问一句还到不到得了目标
   ./loop.sh explain              用大白话讲一遍现在什么情况
 
   ./loop.sh judge                它给了个东西，我不知道好不好 → 它逼问自己，给你选择题
@@ -522,6 +545,7 @@ main() {
     start)   cmd_start "${1:-}" ;;
     go|next|continue) cmd_go ;;
     status|st) cmd_status ;;
+    ceo|操盘) cmd_ceo ;;
     today|daily|今天) cmd_daily ;;
     explain|讲讲) cmd_explain ;;
     judge|判断) cmd_judge ;;
