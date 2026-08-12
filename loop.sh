@@ -294,6 +294,21 @@ cmd_go() {
 
   # 需要你点头的阶段：如果这一步已经跑过、且还没确认过，那这次 go 就是你的"确认"，往下走。
   # 注意用 ran_ 标记而不是"文档在不在"来判断——上一轮遗留的旧文档会让整步被误跳过。
+  # 反过来也要防一手：状态说"跑过了"、该产出的文件却不在。
+  # 这种对不上的状态是旧版本留下的（那时候只要跑完就标成功，不看有没有产出）。
+  # 不拦的话，这次 go 会被当成你"确认了这一步"，等于让你确认一份不存在的文件，
+  # 后面每一步都建立在空气上。发现对不上就把标记清掉，重跑这一步。
+  if stage_needs_signoff "$stage" && [ "$(state_get "ran_$stage" no)" = "yes" ]; then
+    local sdoc; sdoc="$(stage_doc "$stage")"
+    if [ -n "$sdoc" ] && [ ! -f "$sdoc" ]; then
+      warn "状态里记着这一步跑过了，但 $(basename "$sdoc") 不在。"
+      say  "这是旧版本留下的错状态（那时候跑完就算成功，不看有没有产出）。"
+      say  "按「没跑过」处理，重跑这一步。"
+      rule
+      state_set "ran_$stage" no
+    fi
+  fi
+
   if stage_needs_signoff "$stage" \
      && [ "$(state_get "ran_$stage" no)" = "yes" ] \
      && [ "$(state_get "signoff_$stage" no)" = "no" ]; then
