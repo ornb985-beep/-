@@ -402,6 +402,79 @@ cmd_explain() {
   claude_run "$CMD_DIR/explain.md" "${ctx[@]+"${ctx[@]}"}" || true
 }
 
+# 看看现在都有哪些角色，各自聊过几次
+cmd_roles() {
+  local rs; rs="$(roles_list)"
+  if [ -z "$rs" ]; then
+    title "还没有任何角色"
+    say "角色是操盘手按项目需要招的。先跑 ${C_BOLD}./loop.sh ceo${C_OFF}，"
+    say "它会看这个项目反复在哪儿出问题，然后决定需要哪几个专门盯那件事的人。"
+    return 0
+  fi
+  title "现在有这些角色"
+  local r n
+  while IFS= read -r r; do
+    [ -z "$r" ] && continue
+    n="$(find "$LOG_DIR/roles/$r" -name '*.log' 2>/dev/null | wc -l | tr -d ' ')"
+    printf '  %s%-16s%s 聊过 %s 次\n' "$C_BOLD" "$r" "$C_OFF" "${n:-0}"
+    # 角色定义的第一行非空行，就是他管什么
+    sed -n '/^[^#[:space:]]/{p;q}' "$(role_file "$r")" 2>/dev/null | sed 's/^/      /'
+  done <<< "$rs"
+  say ""
+  say "问某个人：${C_BOLD}./loop.sh ask <名字> \"你的问题\"${C_OFF}"
+  say "聊天记录：${C_BOLD}docs/10-会议记录.md${C_OFF}　完整日志：.loop/log/roles/<名字>/"
+}
+
+# 问某个角色一件事。每个角色有自己的对话线程，接着上次聊。
+cmd_ask() {
+  local role="${1:-}" question="${2:-}"
+  [ -n "$role" ] || die "用法：./loop.sh ask <角色> \"问题\"（有哪些角色跑 ./loop.sh roles）"
+  [ -f "$(role_file "$role")" ] || {
+    warn "没有「$role」这个角色。"
+    say  "现有的：$(roles_list | tr '\n' ' ')"
+    say  "招人是操盘手的活：./loop.sh ceo"
+    exit 1
+  }
+  [ -n "$question" ] || die "要问什么？用法：./loop.sh ask $role \"你的问题\""
+
+  title "问「$role」"
+  say "${C_DIM}$question${C_OFF}"
+  rule
+
+  local ctx=() s d
+  for s in "${STAGES[@]}"; do
+    d="$(stage_doc "$s")"
+    [ -n "$d" ] && [ -f "$d" ] && ctx+=("$d")
+  done
+
+  local rc=0
+  ask_role "$role" "$question" "${ctx[@]+"${ctx[@]}"}" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  if [ "$rc" -ne 0 ]; then report_failure "$rc" "问「$role」的时候出错了"; return $?; fi
+
+  # 记一笔，谁问了谁什么、什么时候、完整记录在哪 —— 这就是「可追溯」
+  mkdir -p "$DOC_DIR"
+  if [ ! -f "$MEETING_LOG" ]; then
+    cat > "$MEETING_LOG" <<'MD'
+# 10 · 会议记录
+
+> 谁问了谁什么、什么时候问的、完整对话在哪。
+> **只追加，不改写**——改过的会议记录没有价值，因为看不出当时到底怎么想的。
+
+MD
+  fi
+  {
+    printf '\n## %s · 问「%s」\n\n' "$(date '+%Y-%m-%d %H:%M')" "$role"
+    printf '**问**：%s\n\n' "$question"
+    printf '**答**（完整记录：`%s`）：\n\n' "${LAST_LOG#"$ROOT/"}"
+    sed 's/^/> /' "$LAST_LOG" 2>/dev/null | tail -40
+    printf '\n'
+  } >> "$MEETING_LOG"
+
+  rule
+  ok "已记进 ${C_BOLD}docs/10-会议记录.md${C_OFF}（完整对话在 ${LAST_LOG#"$ROOT/"}）"
+}
+
 # 内置操盘手：看数、裁决、组队、问责
 #
 # 跟专家席是两个角色，别混：专家各自给判断、可以互相矛盾；
@@ -509,6 +582,8 @@ cmd_help() {
   ./loop.sh status               看进度
   ./loop.sh today                每天用：今天做哪 3 件事，顺便看这周到底动了没有
   ./loop.sh ceo                  内置操盘手：看数、拍板、组队、问一句还到不到得了目标
+  ./loop.sh roles                看看现在有哪些角色，各自聊过几次
+  ./loop.sh ask <角色> "问题"     单独问某个人。每个人有自己的对话线程，接着上次聊
   ./loop.sh explain              用大白话讲一遍现在什么情况
 
   ./loop.sh judge                它给了个东西，我不知道好不好 → 它逼问自己，给你选择题
@@ -546,6 +621,8 @@ main() {
     go|next|continue) cmd_go ;;
     status|st) cmd_status ;;
     ceo|操盘) cmd_ceo ;;
+    roles|角色) cmd_roles ;;
+    ask|问)  cmd_ask "${1:-}" "${2:-}" ;;
     today|daily|今天) cmd_daily ;;
     explain|讲讲) cmd_explain ;;
     judge|判断) cmd_judge ;;

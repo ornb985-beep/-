@@ -145,6 +145,40 @@ LOOP_ALLOWED_TOOLS="${LOOP_ALLOWED_TOOLS:-WebSearch WebFetch Read Write Edit Glo
 
 have_claude() { command -v "$CLAUDE_BIN" >/dev/null 2>&1; }
 
+# ---------- 角色（操盘手 / 专家 / CEO 招的人）----------
+#
+# 每个角色是一个独立的对话线程：自己的会话、自己的日志、自己的记录。
+#
+# 为什么要分开：一个脑子里同时装着获客、合规、成本，三件事都想得很浅。
+# 分开之后每个角色只盯一件事，视角不互相污染。
+#
+# 两条是实测出来的，不是设想的：
+#   1. --session-id 钉住会话，下次 -r 接着说，它确实记得上次说过什么。
+#   2. 但 --append-system-prompt 立不住角色身份——CLAUDE.md 分量太重会盖过它。
+#      所以角色身份必须写在提示词正文里，每次都带上。
+ROLE_DIR="$STATE_DIR/roles"
+MEETING_LOG="$DOC_DIR/10-会议记录.md"
+
+new_uuid() {
+  if [ -r /proc/sys/kernel/random/uuid ]; then cat /proc/sys/kernel/random/uuid
+  elif command -v uuidgen >/dev/null 2>&1; then uuidgen | tr 'A-Z' 'a-z'
+  else printf '%s-%s-4%s-8%s-%s' \
+    "$(od -An -tx1 -N4 /dev/urandom | tr -d ' \n')" \
+    "$(od -An -tx1 -N2 /dev/urandom | tr -d ' \n')" \
+    "$(od -An -tx1 -N2 /dev/urandom | tr -d ' \n' | cut -c2-4)" \
+    "$(od -An -tx1 -N2 /dev/urandom | tr -d ' \n' | cut -c2-4)" \
+    "$(od -An -tx1 -N6 /dev/urandom | tr -d ' \n')"
+  fi
+}
+
+roles_list() {
+  [ -d "$ROLE_DIR" ] || return 0
+  find "$ROLE_DIR" -maxdepth 1 -name '*.md' -exec basename {} .md \; 2>/dev/null | sort
+}
+
+role_file()    { echo "$ROLE_DIR/$1.md"; }
+role_session() { echo "$ROLE_DIR/$1.session"; }
+
 # 最近一次调用的日志路径，claude_run 里赋值
 LAST_LOG=""
 
@@ -188,9 +222,11 @@ claude_run() {
   local prompt
   prompt="$(strip_frontmatter "$prompt_file")$ctx"
 
-  mkdir -p "$LOG_DIR"
+  # 角色的日志各自归各自的目录，方便按人回看整条对话
+  local dir="$LOG_DIR${LOG_SUBDIR:+/$LOG_SUBDIR}"
+  mkdir -p "$dir"
   local ts; ts="$(date +%Y%m%d-%H%M%S)"
-  local logf="$LOG_DIR/$ts-$(basename "$prompt_file" .md).log"
+  local logf="$dir/$ts-$(basename "$prompt_file" .md).log"
   LAST_LOG="$logf"   # 出事的时候要回头翻这个日志，见 blocker_reason
 
   if ! have_claude; then
@@ -208,9 +244,43 @@ claude_run() {
   # --permission-mode acceptEdits：允许它直接改文件，否则每步都要你按确认，就不叫自动了
   # shellcheck disable=SC2086
   printf '%s' "$prompt" | "$CLAUDE_BIN" -p \
+      ${CLAUDE_EXTRA_ARGS[@]+"${CLAUDE_EXTRA_ARGS[@]}"} \
       --permission-mode acceptEdits \
       --allowedTools $LOOP_ALLOWED_TOOLS 2>&1 | tee "$logf"
   return "${PIPESTATUS[1]}"
+}
+
+# 问某个角色一个问题。每个角色有自己的会话，接着上次聊。
+# 用法：ask_role <角色名> <问题> [附加上下文文件...]
+ask_role() {
+  local role="$1" question="$2"; shift 2
+  local rf; rf="$(role_file "$role")"
+  [ -f "$rf" ] || { warn "没有这个角色：$role"; return 1; }
+
+  local sf; sf="$(role_session "$role")"
+  local tmp; tmp="$STATE_DIR/ask-$role.md"
+  local -a CLAUDE_EXTRA_ARGS
+
+  if [ -s "$sf" ]; then
+    # 接着上次的对话。
+    #
+    # 这里只发一句身份提醒，不重发完整角色定义——实测过：
+    # 每次重发完整定义，它会把那当成一条全新指令，于是重新推导出
+    # 跟上次一模一样的回答，而不是接着往下推进。
+    # 身份靠对话历史带着走就够了（"47"那个测试证明历史是在的）。
+    CLAUDE_EXTRA_ARGS=(-r "$(cat "$sf")")
+    { printf '（还是你，%s。接着上次说，不用从头重复立场。）\n\n' "$role"
+      printf '%s\n' "$question"; } > "$tmp"
+  else
+    # 第一次：钉住会话，发完整角色定义。
+    # 身份必须写在正文里——实测 --append-system-prompt 压不过 CLAUDE.md。
+    local uuid; uuid="$(new_uuid)"
+    printf '%s' "$uuid" > "$sf"
+    CLAUDE_EXTRA_ARGS=(--session-id "$uuid")
+    { cat "$rf"; printf '\n\n---- 现在问你这件事 ----\n%s\n' "$question"; } > "$tmp"
+  fi
+
+  LOG_SUBDIR="roles/$role" claude_run "$tmp" "$@"
 }
 
 # ---------- 任务清单进度 ----------
