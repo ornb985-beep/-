@@ -402,6 +402,56 @@ cmd_explain() {
   claude_run "$CMD_DIR/explain.md" "${ctx[@]+"${ctx[@]}"}" || true
 }
 
+# 从模板招一批人进来。不写名字就列出有哪些可招。
+#
+# 为什么是"按需招"而不是"一次全建"：实测一次调用 $0.68~$8.20，
+# 十个专家各出一份意见书就是十几次调用。
+# 全员开大会不是气派，是烧钱——CEO 该判断这件事问谁，而不是问所有人。
+cmd_hire() {
+  local pool="$ROOT/roles-模板"
+  [ -d "$pool" ] || die "找不到角色模板目录：roles-模板/"
+
+  if [ "$#" -eq 0 ] || [ -z "${1:-}" ]; then
+    title "可以招的人"
+    local f n
+    for f in "$pool"/*.md; do
+      n="$(basename "$f" .md)"
+      if [ -f "$(role_file "$n")" ]; then printf '  %s%-8s%s 已在岗\n' "$C_GREEN" "$n" "$C_OFF"
+      else printf '  %-8s %s\n' "$n" "$(sed -n '1p' "$f" | sed 's/.*\*\*，//; s/$//' | cut -c1-40)"; fi
+    done
+    say ""
+    say "招人：${C_BOLD}./loop.sh hire 战略 财务 风控${C_OFF}"
+    say "${C_DIM}别一次全招——一次会诊十几次调用，实测一次 \$0.68~\$8.20。让 CEO 判断该问谁。${C_OFF}"
+    return 0
+  fi
+
+  mkdir -p "$ROLE_DIR"
+  local n hired=0
+  for n in "$@"; do
+    [ -z "$n" ] && continue
+    if [ ! -f "$pool/$n.md" ]; then warn "没有「$n」这个模板（跑 ./loop.sh hire 看有哪些）"; continue; fi
+    if [ -f "$(role_file "$n")" ]; then say "  $n 已经在岗了，跳过"; continue; fi
+    cp "$pool/$n.md" "$(role_file "$n")"
+    ok "招了：$n"
+    hired=$((hired+1))
+  done
+  [ "$hired" -eq 0 ] && return 0
+
+  group_say "系统" "新来了 $hired 个人：$*。他们能看到这之后的群聊内容。"
+  say ""
+  say "问他们：${C_BOLD}./loop.sh ask <名字> \"问题\"${C_OFF}"
+  say "看看都有谁：${C_BOLD}./loop.sh roles${C_OFF}"
+}
+
+# 你在群里说一句话。所有角色下次说话前都会看到。
+cmd_say() {
+  local text="${1:-}"
+  [ -n "$text" ] || die "用法：./loop.sh say \"你想说的话\""
+  group_say "你" "$text"
+  ok "说了。所有角色下次开口前都会看到这句。"
+  say "${C_DIM}群聊：docs/10-群聊.md${C_OFF}"
+}
+
 # 花了多少钱、哪一步最贵
 #
 # 这个命令存在的理由很具体：这套东西两次撞上额度上限、白烧 5 次重试，
@@ -486,32 +536,20 @@ cmd_ask() {
   local ctx=(); local d
   while IFS= read -r d; do [ -n "$d" ] && ctx+=("$d"); done < <(role_context "$role")
 
+  # 问题先进群聊，再让角色跑。
+  # 反过来的话有两个毛病：群聊里问答顺序是乱的；
+  # 而且角色看不见"我正被问什么"，只能靠提示词里那一份。
+  group_say "你 → @$role" "$question"
+
   local rc=0
   ask_role "$role" "$question" "${ctx[@]+"${ctx[@]}"}" || rc=$?
   [ "$rc" -eq 3 ] && return 0
   if [ "$rc" -ne 0 ]; then report_failure "$rc" "问「$role」的时候出错了"; return $?; fi
 
-  # 记一笔，谁问了谁什么、什么时候、完整记录在哪 —— 这就是「可追溯」
-  mkdir -p "$DOC_DIR"
-  if [ ! -f "$MEETING_LOG" ]; then
-    cat > "$MEETING_LOG" <<'MD'
-# 10 · 会议记录
+  # 回答进群聊——这样别的角色下次说话前就看得见
+  group_say "$role" "$(tail -60 "$LAST_LOG" 2>/dev/null)"
 
-> 谁问了谁什么、什么时候问的、完整对话在哪。
-> **只追加，不改写**——改过的会议记录没有价值，因为看不出当时到底怎么想的。
-
-MD
-  fi
-  {
-    printf '\n## %s · 问「%s」\n\n' "$(date '+%Y-%m-%d %H:%M')" "$role"
-    printf '**问**：%s\n\n' "$question"
-    printf '**答**（完整记录：`%s`）：\n\n' "${LAST_LOG#"$ROOT/"}"
-    sed 's/^/> /' "$LAST_LOG" 2>/dev/null | tail -40
-    printf '\n'
-  } >> "$MEETING_LOG"
-
-  rule
-  ok "已记进 ${C_BOLD}docs/10-会议记录.md${C_OFF}（完整对话在 ${LAST_LOG#"$ROOT/"}）"
+  ok "已进群聊 ${C_BOLD}docs/10-群聊.md${C_OFF}（完整对话在 ${LAST_LOG#"$ROOT/"}）"
 }
 
 # 内置操盘手：看数、裁决、组队、问责
@@ -621,6 +659,8 @@ cmd_help() {
   ./loop.sh status               看进度
   ./loop.sh today                每天用：今天做哪 3 件事，顺便看这周到底动了没有
   ./loop.sh ceo                  内置操盘手：看数、拍板、组队、问一句还到不到得了目标
+  ./loop.sh hire [名字...]       从模板招人（不写名字就看有哪些可招）
+  ./loop.sh say "话"             在群里说一句，所有角色下次开口前都会看到
   ./loop.sh cost                 花了多少钱、哪一步最贵
   ./loop.sh roles                看看现在有哪些角色，各自聊过几次
   ./loop.sh ask <角色> "问题"     单独问某个人。每个人有自己的对话线程，接着上次聊
@@ -661,6 +701,8 @@ main() {
     go|next|continue) cmd_go ;;
     status|st) cmd_status ;;
     ceo|操盘) cmd_ceo ;;
+    hire|招人) shift 0; cmd_hire "$@" ;;
+    say|说) cmd_say "${1:-}" ;;
     cost|花钱|账) cmd_cost ;;
     roles|角色) cmd_roles ;;
     ask|问)  cmd_ask "${1:-}" "${2:-}" ;;

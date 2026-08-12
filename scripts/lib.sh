@@ -198,7 +198,54 @@ cost_record() {
 #   2. 但 --append-system-prompt 立不住角色身份——CLAUDE.md 分量太重会盖过它。
 #      所以角色身份必须写在提示词正文里，每次都带上。
 ROLE_DIR="$STATE_DIR/roles"
-MEETING_LOG="$DOC_DIR/10-会议记录.md"
+
+# 群聊：所有角色都读、都写的那一个文件，你也在里面。
+#
+# 为什么必须有：没有它，21 个角色只是 21 个互不相干的对话——
+# 每个人都只知道自己说过什么，不知道别人说了什么，
+# 那不叫组织，叫二十一个独立顾问。
+#
+# 为什么是文件不是飞书：这套东西是你机器上的一个脚本，没有常驻服务。
+# 接飞书要注册应用、拿凭证、开一个一直跑着的进程收 webhook——那是另一个项目。
+# 而「他们能互相交流、我能看见并指挥」这件事，一个共享文件就能成立。
+# 飞书只是把这个文件换个更好看的显示界面，不是换个机制。
+GROUP_CHAT="$DOC_DIR/10-群聊.md"
+MEETING_LOG="$GROUP_CHAT"     # 兼容旧名字
+
+# 群聊最近的 N 行，喂给角色当上下文——这样他们才看得见别人说了什么
+GROUP_CHAT_TAIL="${GROUP_CHAT_TAIL:-120}"
+
+group_chat_init() {
+  [ -f "$GROUP_CHAT" ] && return 0
+  mkdir -p "$DOC_DIR"
+  cat > "$GROUP_CHAT" <<'MD'
+# 10 · 群聊
+
+> 这里是所有角色和你共处的一个地方。
+> **每个角色说话前都会先看这里最近的内容**，所以他们看得见彼此说了什么。
+>
+> - 你说话：`./loop.sh say "你的话"`，或者直接在这个文件末尾打字
+> - 问某个人：`./loop.sh ask <名字> "问题"`，问和答都会出现在这里
+> - **只追加，不改写**——改过的记录看不出当时到底怎么想的，就没有价值了
+
+MD
+}
+
+# 把群聊最近的内容抠出来，给角色当上下文
+group_chat_recent() {
+  [ -f "$GROUP_CHAT" ] || return 0
+  local tmp="$STATE_DIR/群聊-最近.md"
+  { printf '# 群聊最近的内容（你说话前先看一眼，别人可能已经说过了）\n\n'
+    tail -n "$GROUP_CHAT_TAIL" "$GROUP_CHAT"; } > "$tmp"
+  printf '%s' "$tmp"
+}
+
+# 往群聊里说一句话
+group_say() {
+  local who="$1" text="$2"
+  group_chat_init
+  { printf '\n**%s · %s**\n\n%s\n' "$(date '+%m-%d %H:%M')" "$who" "$text"; } >> "$GROUP_CHAT"
+}
 
 new_uuid() {
   if [ -r /proc/sys/kernel/random/uuid ]; then cat /proc/sys/kernel/random/uuid
@@ -338,6 +385,11 @@ ask_role() {
   local role="$1" question="$2"; shift 2
   local rf; rf="$(role_file "$role")"
   [ -f "$rf" ] || { warn "没有这个角色：$role"; return 1; }
+
+  # 群聊最近的内容也带上——不带的话，每个角色都只知道自己说过什么，
+  # 那就不是一个组织，是二十一个互不相干的顾问。
+  local gc; gc="$(group_chat_recent)"
+  [ -n "$gc" ] && set -- "$@" "$gc"
 
   local sf; sf="$(role_session "$role")"
   local tmp; tmp="$STATE_DIR/ask-$role.md"
