@@ -117,6 +117,30 @@ LOOP_ALLOWED_TOOLS="${LOOP_ALLOWED_TOOLS:-WebSearch WebFetch Read Write Edit Glo
 
 have_claude() { command -v "$CLAUDE_BIN" >/dev/null 2>&1; }
 
+# 最近一次调用的日志路径，claude_run 里赋值
+LAST_LOG=""
+
+# 分清「外面的原因」和「这一步真做错了」。
+#
+# 这两种失败在屏幕上长得一模一样（都是"没跑成功"），但处理方式完全相反：
+#   额度用完/断网 → 等一会儿再跑就好，重跑一百次也没用
+#   真做错了      → 得看日志改东西，不改再跑还是错
+#
+# 为什么要专门写这个：第一次跑到底的测试里，AI 额度用完了，
+# 而循环分不清这两种情况，对着同一个"额度已用完"空转重试了 5 次。
+# 分不清的代价不是白等，是把剩下的额度也烧在无用功上。
+#
+# 输出：<类型>制表符<日志里的原话>；不是外部原因就返回 1。
+blocker_reason() {
+  local logf="$1" line
+  [ -f "$logf" ] || return 1
+  line="$(grep -m1 -iE 'hit your (session|usage) limit|usage limit reached|rate limit|too many requests|credit balance|quota exceeded' "$logf" 2>/dev/null || true)"
+  [ -n "$line" ] && { printf '%s\t%s' quota "$line"; return 0; }
+  line="$(grep -m1 -iE 'getaddrinfo|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|fetch failed|network error|socket hang up' "$logf" 2>/dev/null || true)"
+  [ -n "$line" ] && { printf '%s\t%s' network "$line"; return 0; }
+  return 1
+}
+
 # claude_run <提示词文件> [附加上下文文件...]
 # 把提示词和上下文拼起来丢给 claude；没装 claude 就把提示词存下来让用户手动贴。
 # 去掉说明书开头那段 --- 包起来的标注（它是给 slash command 用的）。
@@ -139,6 +163,7 @@ claude_run() {
   mkdir -p "$LOG_DIR"
   local ts; ts="$(date +%Y%m%d-%H%M%S)"
   local logf="$LOG_DIR/$ts-$(basename "$prompt_file" .md).log"
+  LAST_LOG="$logf"   # 出事的时候要回头翻这个日志，见 blocker_reason
 
   if ! have_claude; then
     local dump="$STATE_DIR/待手动执行.txt"

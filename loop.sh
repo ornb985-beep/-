@@ -44,6 +44,22 @@ run_stage() {
   if [ "$rc" -eq 3 ]; then
     return 3   # 没装 claude，已提示手动执行
   elif [ "$rc" -ne 0 ]; then
+    # 先看看是不是外面的原因（额度用完、断网）。是的话别说成"做错了"，
+    # 也别让人白重试——重试解决不了额度问题。
+    local b; b="$(blocker_reason "$LAST_LOG" || true)"
+    if [ -n "$b" ]; then
+      rule
+      case "${b%%$'\t'*}" in
+        quota)   warn "不是代码坏了，是 AI 的额度用完了。" ;;
+        network) warn "不是代码坏了，是连不上网。" ;;
+      esac
+      say "  它自己的原话：${C_DIM}${b#*$'\t'}${C_OFF}"
+      say ""
+      say "${C_BOLD}现在重跑没有用${C_OFF}，会得到一模一样的结果。等恢复了再跑 ${C_BOLD}./loop.sh go${C_OFF}——"
+      say "前面做完的几步不会重做，直接从卡住的这一步接着跑。"
+      rule
+      return 2   # 2 = 外部原因卡住，不是这一步做错了
+    fi
     die "这一步没跑成功（退出码 $rc）。日志在 .loop/log/ 里，可以直接把日志贴给我看。"
   fi
 
