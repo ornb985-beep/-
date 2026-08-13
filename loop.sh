@@ -1529,6 +1529,85 @@ cmd_provider() {
   return 0
 }
 
+# ---------- 启蒙：四位大师各说一块，拧成几个能选的方向 ----------
+#
+# 结构照搬「论证」那一套（lz_one 那个路子）：一人一块不重叠、
+# 各自落盘、产物不在就是没交、可重跑跳过已交的。不重造。
+ENLIGHT_FILE="$DOC_DIR/00-启蒙.md"
+MASTERS="${MASTERS:-美学大师 哲学大师 历史人文大师 精神意识大师}"
+
+cmd_enlighten() {
+  [ -f "$BLUEPRINT_FILE" ] || die "先把蓝图画出来：./loop.sh 蓝图"
+  local b; b="$(budget_get)"
+  [ -z "$b" ] && { warn "这一步要跑五次调用。先设个上限：./loop.sh budget 20"; return 1; }
+
+  local who
+  for who in $MASTERS; do
+    if [ ! -f "$(role_file "$who")" ]; then
+      [ -f "$ROOT/roles-模板/$who.md" ] || die "缺少 roles-模板/$who.md"
+      mkdir -p "$ROLE_DIR"; cp "$ROOT/roles-模板/$who.md" "$(role_file "$who")"
+    fi
+  done
+
+  title "启蒙 · 四位大师"
+  say "${C_DIM}一人只管一块，不重叠。最后拧成几个你能选的方向，具体到按钮。${C_OFF}"
+  rule
+
+  local ctx=("$BLUEPRINT_FILE")
+  local f
+  for f in "$LISTEN_FILE" "$DOC_DIR/00-镜子.md" "$AESTHETIC_FILE" "$DOC_DIR/00-论证.md"; do
+    [ -f "$f" ] && ctx+=("$f")
+  done
+  local kb; kb="$(kb_files)"
+  [ -n "$kb" ] && while IFS= read -r f; do [ -n "$f" ] && ctx+=("$f"); done <<< "$kb"
+
+  for who in $MASTERS; do
+    local out="$WORK_DIR/$who/启蒙.md"
+    if [ -f "$out" ]; then
+      say "  ${C_DIM}$who 已经交过了，跳过（想重跑就删掉 ${out#"$ROOT/"}）${C_OFF}"; continue
+    fi
+    mkdir -p "$(dirname "$out")"
+    info "  $who …"
+    local q
+    q="$(printf '%s\n' \
+      "照你那一块，给这个产品的形式和细节提判断。" \
+      "" \
+      "**每一条必须落到一个能做的决定上**，落不到的删掉。" \
+      "「要有人文关怀」不算，「删除不弹确认框，改成 5 秒撤销」才算。" \
+      "" \
+      "**每条判断挂出处**，能查的那种。查不到就说查不到，不许编。" \
+      "" \
+      "写进 $out：" \
+      "## 我这一块看到的" \
+      "## 具体到能做的决定（至少 3 条，每条带出处和代价）" \
+      "## 我最没把握的一条" )"
+    local rc=0
+    NO_GROUP_CHAT=1 ROLE_ISOLATED=1 ROLE_CWD="$WORK_DIR/$who" \
+      ask_role "$who" "$q" "${ctx[@]}" >/dev/null 2>&1 || rc=$?
+    if [ -f "$out" ]; then ok "  $who 交了"; group_say "$who" "$(head -20 "$out")"
+    else warn "  $who 没交东西（退出码 $rc）"; fi
+  done
+
+  rule
+  title "拧成方向"
+  local actx=("${ctx[@]}")
+  for who in $MASTERS; do
+    [ -f "$WORK_DIR/$who/启蒙.md" ] && actx+=("$WORK_DIR/$who/启蒙.md")
+  done
+  local rc=0
+  claude_run "$CMD_DIR/启蒙.md" "${actx[@]}" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  if [ "$rc" -ne 0 ]; then report_failure "$rc" "综合的时候出错了"; return $?; fi
+  [ -f "$ENLIGHT_FILE" ] || { rule; warn "没产出 00-启蒙.md，按没做成处理。"; return 1; }
+
+  rule
+  ok "方向在 ${C_BOLD}${ENLIGHT_FILE#"$ROOT/"}${C_OFF}"
+  say ""
+  say "${C_DIM}选一个：./loop.sh 改 \"我选 B\"　它会把这个方向并进蓝图${C_OFF}"
+  say "${C_DIM}四位大师的完整意见：work/<名字>/启蒙.md${C_OFF}"
+  rule
+}
+
 # ---------- 审美：给他看真东西，从他的选择里反推他的审美 ----------
 #
 # 不许问「你喜欢什么风格」——他答不上来，没人答得上来。
@@ -2182,6 +2261,7 @@ cmd_help() {
   ./loop.sh 蓝图                 画产品蓝图：形态/功能/技术/时间表，一直改到你说「就是它了」
   ./loop.sh 改 "A"               回答蓝图的问题，或者说哪儿不对
   ./loop.sh 定了                 对，这就是我要做的（蓝图锁定）
+  ./loop.sh 启蒙                 四位大师（美学/哲学/历史人文/精神意识）拧出几个方向，细到按钮
   ./loop.sh 审美                 给你看真东西，从你的选择里反推出你的审美标准
   ./loop.sh 手册                 一步一步带你做出来，含所有要花钱的点
   ./loop.sh 照镜子               动手之前，先看清你到底想要什么（只用你自己的话当镜子）
@@ -2253,6 +2333,7 @@ main() {
     assign|派活) cmd_assign "${1:-}" "${2:-}" ;;
     review|验收) cmd_review ;;
     ledger|台账) cmd_board ;;
+    enlighten|启蒙) cmd_enlighten ;;
     aesthetic|审美) cmd_aesthetic ;;
     manual|手册|落地手册) cmd_manual ;;
     blueprint|蓝图) cmd_blueprint ;;
