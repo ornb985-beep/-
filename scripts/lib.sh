@@ -446,12 +446,20 @@ claude_run() {
   # 解析不了就退回纯文本，照常能跑，只是没有账。
   if [ -n "$(json_parser)" ]; then
     local raw="$logf.json"
+    # ROLE_CWD：在指定目录里跑，而不是项目根目录。
+    #
+    # 为什么需要：项目根目录有 CLAUDE.md，它的分量压过一切提示词——
+    # 实测让「行业专家」去做一份跟本项目无关的行业报告，
+    # 它读完项目的 CLAUDE.md 和任务清单，跑去汇报项目进度、
+    # 甚至去做项目的开发任务，连着两次都没交该交的报告。
+    # 提示词里写"别管项目"没用，得让它根本不在那个目录里。
+    # 这也正是「每个角色独立环境」真正该有的样子。
     # shellcheck disable=SC2086
-    printf '%s' "$prompt" | "$CLAUDE_BIN" -p \
+    printf '%s' "$prompt" | ( [ -n "${ROLE_CWD:-}" ] && cd "$ROLE_CWD"; "$CLAUDE_BIN" -p \
         ${CLAUDE_EXTRA_ARGS[@]+"${CLAUDE_EXTRA_ARGS[@]}"} \
         --output-format json \
         --permission-mode acceptEdits \
-        --allowedTools $LOOP_ALLOWED_TOOLS > "$raw" 2>"$logf.err"
+        --allowedTools $LOOP_ALLOWED_TOOLS ) > "$raw" 2>"$logf.err"
     local rc="$?"
 
     # 正文照样打出来给人看，别为了记账就把人能看的东西弄没了
@@ -480,8 +488,12 @@ ask_role() {
 
   # 群聊最近的内容也带上——不带的话，每个角色都只知道自己说过什么，
   # 那就不是一个组织，是二十一个互不相干的顾问。
-  local gc; gc="$(group_chat_recent)"
-  [ -n "$gc" ] && set -- "$@" "$gc"
+  # NO_GROUP_CHAT=1 的活不喂群聊：像行业报告这种议题跟当前项目无关的，
+  # 群聊里别的项目的事会把它带跑偏——实测它读完就去汇报别的项目进度了。
+  if [ "${NO_GROUP_CHAT:-0}" != "1" ]; then
+    local gc; gc="$(group_chat_recent)"
+    [ -n "$gc" ] && set -- "$@" "$gc"
+  fi
 
   local sf; sf="$(role_session "$role")"
   local tmp; tmp="$STATE_DIR/ask-$role.md"

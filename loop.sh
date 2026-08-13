@@ -611,16 +611,22 @@ cmd_industry() {
   rule
   group_say "CEO → @行业专家" "【行业报告】$topic"$'\n\n'"交到：\`${deliver#"$ROOT/"}\`"
 
-  local ctx=(); local d
-  while IFS= read -r d; do [ -n "$d" ] && ctx+=("$d"); done < <(role_context 行业专家)
-
+  # 【不喂项目文档】行业报告的议题经常跟当前项目无关——
+  # 你可能正在为下一个方向做调研。喂项目文档的后果实测过：
+  # 它读完一堆微信工具的文档，跑去汇报那个项目的进度，
+  # 完全没做该做的行业报告。上下文不是越多越好，喂错了会把人带沟里。
+  local ctx=()
   local instruction; instruction="$(cat <<EOF
 【这是一份行业报告的活。照你角色定义里的五步做，一步都不许省。】
 
 议题：$topic
 
+## 先说清楚：这个议题跟当前项目可能没关系
+你现在做的是【对这个议题所在行业】的调研，**不是汇报任何项目的进度**。
+群聊里那些别的项目的事，跟这份报告无关，别提。
+
 ## 交付物
-写到这个文件：$deliver
+写到这个文件：$stamp-行业报告.md（就在你当前所在的目录，直接写文件名即可）
 **必须是这个文件本身**——只在对话里说一遍不算交付。
 
 ## 一人一份，不许揉在一起
@@ -640,7 +646,11 @@ EOF
 )"
 
   local rc=0
-  ROLE_ISOLATED=1 ask_role 行业专家 "$instruction" "${ctx[@]+"${ctx[@]}"}" || rc=$?
+  # NO_GROUP_CHAT=1：群聊里全是别的项目的事，会把它带跑偏（实测过）
+  # 在行业专家自己的工作区里跑，不在项目根目录——
+  # 项目根目录有 CLAUDE.md，会把它拽去做项目的活（实测两次都跑偏）
+  NO_GROUP_CHAT=1 ROLE_ISOLATED=1 ROLE_CWD="$ws" \
+    ask_role 行业专家 "$instruction" "${ctx[@]+"${ctx[@]}"}" || rc=$?
   [ "$rc" -eq 3 ] && return 0
   if [ "$rc" -ne 0 ]; then report_failure "$rc" "做行业报告的时候出错了"; return $?; fi
 
