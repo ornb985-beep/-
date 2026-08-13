@@ -468,8 +468,11 @@ $ws/
 EOF
 )"
 
+  # 干活开全新会话：一件活 = 一个自包含任务包。
+  # 十件活堆在同一个会话里会越干越贵，而且第一件活里的错误假设
+  # 会一直粘着往后走。干活的持久化靠交付物，不靠"记住"。
   local rc=0
-  ask_role "$role" "$instruction" "${ctx[@]+"${ctx[@]}"}" || rc=$?
+  ROLE_ISOLATED=1 ask_role "$role" "$instruction" "${ctx[@]+"${ctx[@]}"}" || rc=$?
   [ "$rc" -eq 3 ] && return 0
   if [ "$rc" -ne 0 ]; then report_failure "$rc" "「$role」干活的时候出错了"; return $?; fi
 

@@ -487,7 +487,21 @@ ask_role() {
   local tmp; tmp="$STATE_DIR/ask-$role.md"
   local -a CLAUDE_EXTRA_ARGS
 
-  if [ -s "$sf" ]; then
+  # ROLE_ISOLATED=1 → 这一次开全新会话，不接上次。
+  #
+  # 为什么要分两种：
+  #   问答（ask）需要连续性——不连续就每次从头解释一遍。
+  #   干活（派活）需要隔离——一件活是一个自包含的任务包，
+  #   十件活堆在同一个会话里，会越干越贵，而且第一件活里的
+  #   错误假设会一直粘着往后走（判断漂移）。
+  #
+  # 干活的持久化靠【产物】，不靠"记住"——交付物在文件里，
+  # 下次要用就把文件读进来，比让它记着可靠得多。
+  if [ "${ROLE_ISOLATED:-0}" = "1" ]; then
+    local uuid; uuid="$(new_uuid)"
+    CLAUDE_EXTRA_ARGS=(--session-id "$uuid")
+    { cat "$rf"; printf '\n\n---- 现在问你这件事 ----\n%s\n' "$question"; } > "$tmp"
+  elif [ -s "$sf" ]; then
     # 接着上次的对话。
     #
     # 这里只发一句身份提醒，不重发完整角色定义——实测过：
