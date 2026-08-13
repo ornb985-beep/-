@@ -416,6 +416,14 @@ provider_field() {
   echo "$r" | cut -d'|' -f"$2"
 }
 
+# 把整张供应商表倒出来（面板要用）。
+# 只有这一张表是真的，面板不许自己再抄一份——抄一份就会有一天两边对不上。
+PROVIDERS_ALL="官方 deepseek deepseek-flash"
+provider_dump() {
+  local c
+  for c in $PROVIDERS_ALL; do provider_row "$c"; done
+}
+
 # 同一家的不同型号共用一把钥匙（v4-pro 和 v4-flash 都是 DeepSeek 的）
 provider_family() {
   case "$1" in
