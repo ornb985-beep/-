@@ -1529,6 +1529,66 @@ cmd_provider() {
   return 0
 }
 
+# ---------- 照镜子：在动手之前，先看清他到底想要什么 ----------
+#
+# 为什么要有这一步：大多数项目不是死于做得不好，
+# 是死于【做的根本不是他真正想要的那个东西】——
+# 做到一半发现"我好像也没那么想要这个"，然后就停了。
+#
+# 这一步风险最高，因为心理层面的话最容易编、听起来最深刻、最没法核对。
+# 所以人生导师那份角色定义里写死了一条：
+# 每一句关于他的话，必须能指回他自己说过的原话。「你其实是……」一次都不许出现。
+MIRROR_FILE="$DOC_DIR/00-镜子.md"
+
+cmd_mirror() {
+  [ -f "$LISTEN_FILE" ] || die "先跑第1步把你的话拆开：./loop.sh start \"你想说的\""
+
+  if [ ! -f "$(role_file 人生导师)" ]; then
+    if [ -f "$ROOT/roles-模板/人生导师.md" ]; then
+      mkdir -p "$ROLE_DIR"
+      cp "$ROOT/roles-模板/人生导师.md" "$(role_file 人生导师)"
+      ok "把人生导师请进来了"
+    else
+      die "缺少 roles-模板/人生导师.md"
+    fi
+  fi
+
+  title "照镜子"
+  say "${C_DIM}不给建议，不下判断。只把你自己说过的话摆到你面前。${C_OFF}"
+  rule
+
+  local q
+  q="$(printf '%s\n' \
+    "读 docs/00-听到的.md 里他说的原话，还有他后面补充的回答。" \
+    "" \
+    "照你的规矩做一次镜子，写进 $MIRROR_FILE。" \
+    "" \
+    "**再说一遍那条死规矩**：每一句关于他的话，必须能指回他自己说过的原话。" \
+    "「你其实是……」这五个字一次都不许出现。" \
+    "" \
+    "第二节【只问一个问题】，给具体场景，不问抽象动机。" )"
+
+  local rc=0
+  NO_GROUP_CHAT=1 ROLE_ISOLATED=1 ask_role 人生导师 "$q" "$LISTEN_FILE" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  if [ "$rc" -ne 0 ]; then report_failure "$rc" "照镜子的时候出错了"; return $?; fi
+
+  if [ ! -f "$MIRROR_FILE" ]; then
+    rule
+    warn "没产出 $(basename "$MIRROR_FILE")，按没做成处理。"
+    return 1
+  fi
+
+  rule
+  ok "写在 ${C_BOLD}${MIRROR_FILE#"$ROOT/"}${C_OFF}"
+  say ""
+  say "${C_DIM}想接着聊：./loop.sh ask 人生导师 \"你的话\"${C_OFF}"
+  say "${C_DIM}聊完了回主线：./loop.sh go${C_OFF}"
+  say ""
+  say "${C_DIM}这一步是可选的，跳过不影响流程。${C_OFF}"
+  return 0
+}
+
 # ---------- 论证：十个专家把「这事到底成不成」查一遍 ----------
 #
 # 分两轮，这是这条命令的核心设计：
@@ -1877,6 +1937,7 @@ cmd_help() {
   ./loop.sh 蒸馏                 把报告里的真专家做成能单独提问的智能体
   ./loop.sh 专家群 "议题"        让蒸馏出来的专家依次发言，后面的能反驳前面的
   ./loop.sh 封存 <名字>          用完收起来（不删，随时 ./loop.sh 起复）
+  ./loop.sh 照镜子               动手之前，先看清你到底想要什么（只用你自己的话当镜子）
   ./loop.sh 论证                 十个专家把「这事到底成不成」查一遍，给可行性判定
   ./loop.sh 会诊 "议题"          CEO 判断该问谁 → 逐个咨询 → 综合裁决
   ./loop.sh 派单                 执行总监把 CEO 的决策拆成每个人的活
@@ -1945,6 +2006,7 @@ main() {
     assign|派活) cmd_assign "${1:-}" "${2:-}" ;;
     review|验收) cmd_review ;;
     ledger|台账) cmd_board ;;
+    mirror|照镜子) cmd_mirror ;;
     argue|论证) cmd_argue ;;
     provider|接口|换脑子) cmd_provider "${1:-}" "${2:-}" "${3:-}" ;;
     auto|自动) cmd_auto ;;
