@@ -1,0 +1,344 @@
+<title>MoneyLoop 项目说明书</title>
+<style>
+  :root{
+    --paper:#EDF0F2; --surface:#FFFFFF; --surface-2:#E3E8EC;
+    --ink:#0E1A24; --ink-2:#3D5262; --ink-3:#6B7F8C;
+    --rule:#C2CDD6; --rule-soft:#DBE3E8;
+    --blue:#1D5C8A; --blue-soft:#DCE8F1;
+    --burn:#A8501C; --burn-soft:#F4E4D8;
+    --ok:#1B5E43; --ok-soft:#DCEBE3;
+    --sans:"PingFang SC","Noto Sans SC","Hiragino Sans GB","Microsoft YaHei",system-ui,-apple-system,sans-serif;
+    --serif:"Songti SC","Noto Serif SC","Source Han Serif SC",SimSun,Georgia,serif;
+    --mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --paper:#0C141B; --surface:#121D26; --surface-2:#1A2833;
+      --ink:#E2EAF0; --ink-2:#A7B8C4; --ink-3:#7A8D9A;
+      --rule:#2A3B48; --rule-soft:#1E2C37;
+      --blue:#6BA9D8; --blue-soft:#152836;
+      --burn:#D68A55; --burn-soft:#2B1E15;
+      --ok:#5FB68C; --ok-soft:#12271E;
+    }
+  }
+  :root[data-theme="dark"]{
+    --paper:#0C141B; --surface:#121D26; --surface-2:#1A2833;
+    --ink:#E2EAF0; --ink-2:#A7B8C4; --ink-3:#7A8D9A;
+    --rule:#2A3B48; --rule-soft:#1E2C37;
+    --blue:#6BA9D8; --blue-soft:#152836;
+    --burn:#D68A55; --burn-soft:#2B1E15;
+    --ok:#5FB68C; --ok-soft:#12271E;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);font-size:16px;line-height:1.75;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:940px;margin:0 auto;padding:0 24px 96px}
+  header{padding:60px 0 36px;border-bottom:2px solid var(--ink)}
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--ink-3);margin:0 0 16px}
+  h1{font-family:var(--serif);font-weight:700;font-size:clamp(36px,6vw,56px);line-height:1.1;margin:0 0 20px;text-wrap:balance}
+  .thesis{font-family:var(--serif);font-size:clamp(17px,2.3vw,21px);line-height:1.7;color:var(--ink-2);max-width:44em;margin:0;border-left:3px solid var(--blue);padding-left:20px}
+  section{padding-top:56px}
+  h2{font-family:var(--serif);font-size:clamp(23px,3.2vw,30px);font-weight:700;line-height:1.25;margin:0 0 8px;text-wrap:balance}
+  h3{font-size:17.5px;font-weight:600;margin:28px 0 10px}
+  .sec-num{font-family:var(--mono);font-size:11px;letter-spacing:.16em;color:var(--blue);text-transform:uppercase;display:block;margin-bottom:10px}
+  .lede{color:var(--ink-2);max-width:44em;margin:0 0 24px;font-size:15.5px}
+  p{max-width:44em}
+  code{font-family:var(--mono);font-size:.86em;background:var(--surface-2);padding:1px 5px;color:var(--ink)}
+  .scroll{overflow-x:auto;border:1px solid var(--rule);background:var(--surface);margin:20px 0}
+  table{border-collapse:collapse;width:100%;min-width:580px;font-size:14.5px}
+  th,td{padding:12px 14px;text-align:left;vertical-align:top;border-bottom:1px solid var(--rule-soft)}
+  th{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3);font-weight:600;background:var(--surface-2);white-space:nowrap}
+  tbody tr:last-child td{border-bottom:0}
+  .num{font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+  .call{background:var(--blue-soft);border:1px solid var(--blue);padding:18px 22px;margin:24px 0}
+  .call.warn{background:var(--burn-soft);border-color:var(--burn)}
+  .call.good{background:var(--ok-soft);border-color:var(--ok)}
+  .call p{margin:0 0 10px}.call p:last-child{margin:0}
+  .call-label{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--blue);display:block;margin-bottom:8px;font-weight:600}
+  .call.warn .call-label{color:var(--burn)}.call.good .call-label{color:var(--ok)}
+  .kpi{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:0;border:1px solid var(--rule);background:var(--surface);margin:24px 0}
+  .k{padding:16px 18px;border-right:1px solid var(--rule-soft)}
+  .k:last-child{border-right:0}
+  .k b{display:block;font-family:var(--mono);font-size:25px;font-weight:600;line-height:1.2;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+  .k span{display:block;font-size:12.5px;color:var(--ink-3);margin-top:3px}
+  .k.ok b{color:var(--ok)}.k.burn b{color:var(--burn)}.k.blue b{color:var(--blue)}
+  .list{list-style:none;margin:0;padding:0;display:grid;gap:2px}
+  .list li{background:var(--surface);border:1px solid var(--rule-soft);padding:14px 18px 14px 48px;position:relative;font-size:15px}
+  .list li::before{position:absolute;left:17px;top:14px;font-family:var(--mono);font-size:13px;font-weight:600}
+  .list li.y::before{content:"✓";color:var(--ok)}
+  .list li.n::before{content:"✗";color:var(--burn)}
+  .list li.p::before{content:"~";color:var(--blue)}
+  .list b{display:block;font-weight:600}
+  .list span{display:block;color:var(--ink-2);font-size:14.3px;margin-top:2px}
+  .opt{background:var(--surface);border:1px solid var(--rule-soft);border-top:4px solid var(--rule);padding:18px 20px;margin-bottom:12px}
+  .opt.rec{border-top-color:var(--blue)}
+  .opt-tag{font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3);display:block;margin-bottom:6px}
+  .opt.rec .opt-tag{color:var(--blue);font-weight:600}
+  .opt h4{margin:0 0 8px;font-size:17px;font-weight:600}
+  .opt p{margin:0 0 8px;font-size:14.6px;color:var(--ink-2)}.opt p:last-child{margin:0}
+  .opt dt{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);margin-top:10px}
+  .opt dd{margin:2px 0 0;font-size:14.3px;color:var(--ink-2)}
+  pre{background:var(--surface);border:1px solid var(--rule-soft);padding:16px 18px;overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.7;color:var(--ink-2);margin:18px 0}
+  hr{border:0;border-top:1px solid var(--rule);margin:52px 0 0}
+  footer{padding:32px 0 0;color:var(--ink-3);font-size:13.5px}
+  .tag{font-family:var(--mono);font-size:11px;letter-spacing:.06em;padding:2px 7px;border:1px solid currentColor;white-space:nowrap}
+  .t-f{color:var(--ok)}.t-i{color:var(--blue)}.t-g{color:var(--burn)}
+  :focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+</style>
+
+<div class="wrap">
+
+<header>
+  <p class="eyebrow">项目说明书 · 第一版 · 2026-08-13</p>
+  <h1>MoneyLoop</h1>
+  <p class="thesis">
+    任何一个想法输入，都能快速得到一个诚实的答案——<strong>要么变成赚钱闭环，
+    要么在你花大钱之前告诉你它不行。</strong>
+  </p>
+</header>
+
+<section>
+  <span class="sec-num">〇 · 先说清楚这份文件怎么读</span>
+  <h2>这里面没有一个数是估的</h2>
+  <p class="lede">
+    所有数字都从实际运行记录里数出来，标注方式沿用项目自己的规矩：
+    <span class="tag t-f">事实</span> 有来源能核对 ·
+    <span class="tag t-i">推断</span> 从材料推的 ·
+    <span class="tag t-g">猜测</span> 就是猜的。
+  </p>
+  <div class="call warn">
+    <span class="call-label">第四节是「还没验证的」，请先看那一节</span>
+    <p>把没做到的写在前面，是因为<strong>尽调最先查的就是没提的东西</strong>——
+    被对方先发现，比自己说出来致命得多。</p>
+  </div>
+</section>
+
+<section>
+  <span class="sec-num">一 · 它解决什么</span>
+  <h2>不是「帮你做东西」，是「不让你自欺」</h2>
+
+  <p>一个有判断力的生意人，失败很少因为不会写代码。常见的死法是这五条：</p>
+
+  <div class="scroll"><table>
+    <thead><tr><th>真实死法</th><th>MoneyLoop 在哪一步挡住</th></tr></thead>
+    <tbody>
+      <tr><td>没查就做，建立在假设上</td><td>第2步强制联网查证，带来源和日期，查不到就写查不到</td></tr>
+      <tr><td>分不清哪句是事实哪句是猜的</td><td>全程强制标注，一份看不出哪句是猜的文档被判定为危险</td></tr>
+      <tr><td>说不清「什么算好」，于是无限打磨或草草交付</td><td>第4步不问标准，给你看 A/B/C，<strong>从你的选择反推标准</strong></td></tr>
+      <tr><td>只算成本没算收入</td><td>第1步倒推算账，第7步收支两侧都要答</td></tr>
+      <tr><td>把「能用」当成「有人要」</td><td>四层判断标准，只用当前层的尺子</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="call">
+    <span class="call-label">全套最狠的一道闸，在第1步</span>
+    <pre>一单赚多少 → 每月要多少单 → 每单要接触多少人 → 每天要多少人看到
+→ 这个数字，靠你现在能想到的渠道，拿得到吗？　[拿得到／拿不到／不知道]</pre>
+    <p><strong>大多数点子在这儿当场就死——不是想法不好，是算术不成立。</strong>
+    一分钱不花、一天不等就能知道。</p>
+  </div>
+</section>
+
+<section>
+  <span class="sec-num">二 · 怎么演示</span>
+  <h2>五分钟能看到什么</h2>
+
+  <pre>./loop.sh budget 50                    # 设花钱上限
+./loop.sh start "一句话想法"            # 开始
+./loop.sh go                           # 一直敲，到该拍板的地方它会停
+./loop.sh 看板                          # 生成可视化看板，双击打开</pre>
+
+  <p>演示时最能说明问题的三个动作：</p>
+
+  <ol class="list">
+    <li class="y"><b>第1步的倒推算账</b>
+      <span>输入一个明显不成立的目标，看它当场把算术摊开、指出拿不到那么多人。</span></li>
+    <li class="y"><b>第4步的 A/B/C</b>
+      <span>它不问「你的标准是什么」，而是给三个能想象出画面的版本，
+      选完把标准反推成一句话给你确认。</span></li>
+    <li class="y"><b>外部专家链路</b>
+      <span><code>专家团 → 行业报告 → 蒸馏 → 专家群</code>：
+      CEO 先定缺哪几块判断，再去找真人（国家标准／教材作者／有战绩的操盘手），
+      一人一份落盘带出处，<strong>能逐条回头核对</strong>。</span></li>
+  </ol>
+
+  <div class="call good">
+    <span class="call-label">一次真实运行的产出（可复现）</span>
+    <p>议题：中国电商直播运营。它交回 <strong>200 行报告、6 位单独落盘的专家</strong>，
+    其中挖到<strong>《互联网营销师国家职业技能标准（2021年版）》</strong>——
+    人社部＋网信办＋广电总局联合颁布，把「直播销售员」拆成四工种五等级。</p>
+    <p>并且自评：<strong>「身份可核实的个人 A 类作者偏少，很多编著者查不到机构背景，
+    按诚实红线没敢算进正式名单。够不够支撑一次不可逆的决定：不够。」</strong></p>
+    <p><strong>它宁可承认缺口，也没有凑数。这是演示时最该展示的一幕。</strong></p>
+  </div>
+</section>
+
+<section>
+  <span class="sec-num">三 · 现在有什么</span>
+  <h2>第一版的真实规模</h2>
+
+  <div class="kpi">
+    <div class="k blue"><b>35</b><span>可用命令</span></div>
+    <div class="k"><b>2 452</b><span>行程序代码</span></div>
+    <div class="k"><b>2 918</b><span>行说明书（22 份）</span></div>
+    <div class="k"><b>2 401</b><span>行方法论（8 份）</span></div>
+    <div class="k ok"><b>46</b><span>次提交</span></div>
+  </div>
+
+  <div class="scroll"><table>
+    <thead><tr><th>能力</th><th>状态</th><th>验证方式</th></tr></thead>
+    <tbody>
+      <tr><td>九步流水线跑通</td><td><span class="tag t-f">已验证</span></td><td>真实项目从第1步跑到第9步，产出 2 021 行文档 ＋ 404 行代码 ＋ 12 个通过的测试</td></tr>
+      <tr><td>多角色组织（参谋层／执行层）</td><td><span class="tag t-f">已验证</span></td><td>各自独立会话、独立工作区、共享群聊；实测风控驳回了战略的论据</td></tr>
+      <tr><td>外部专家蒸馏</td><td><span class="tag t-f">已验证</span></td><td>从真实报告蒸馏 6 位（4 位体系类含国家标准）</td></tr>
+      <tr><td>成本可见 ＋ 预算闸门</td><td><span class="tag t-f">已验证</span></td><td>逐次记账；设 $5 上限、已花 $18 时自动拒绝启动</td></tr>
+      <tr><td>桌面看板</td><td><span class="tag t-f">已验证</span></td><td>从真实状态生成本地 HTML，零依赖离线可用</td></tr>
+      <tr><td>无人值守</td><td><span class="tag t-i">可用</span></td><td>撞到预算／闸门／卡点五种情况会停</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="call">
+    <span class="call-label">最值得说的不是功能数量</span>
+    <p>开发过程中撞出并修复了 <strong>10 个「看着是 ✓ 其实什么都没发生」的缺陷</strong>——
+    跑过≠跑成了、勾了≠做了、通过了≠验了、规矩写了≠规矩执行了。</p>
+    <p><strong>这类缺陷最危险的地方不是它错，是它错得很好看</strong>：
+    每一步都显示成功，实际后面全建立在空气上。
+    所以第 6 条铁律不只写在提示词里，<strong>是在代码里硬查的</strong>：
+    每步跑完检查该产出的文件在不在，不在就判定「没做成」，不往下走。</p>
+  </div>
+</section>
+
+<section>
+  <span class="sec-num">四 · 还没验证的</span>
+  <h2>这一节请先读</h2>
+
+  <ul class="list">
+    <li class="n"><b>能不能赚到钱：零验证</b>
+      <span>验证过的是「机器能转」，<strong>没验证过「转出来的东西有人要、有人付钱」</strong>。
+      <strong>收入至今为 0。</strong></span></li>
+    <li class="n"><b>样本量 = 1</b>
+      <span>唯一的使用者就是作者本人。<strong>没有第二个人完整用过。</strong></span></li>
+    <li class="n"><b>「他们愿不愿意付费」是承重墙，且是猜测</b>
+      <span>整个定位架在这条上。<span class="tag t-g">猜测</span>
+      如果错了，整个方向要重来。<strong>这是现在最该先花钱验的一条。</strong></span></li>
+    <li class="p"><b>目前偏重</b>
+      <span>同类里最轻的工具做完一个任务 12 分钟，最重的 5.5 小时。
+      <strong>本项目目前属于重的那一派</strong>，而这个品类被记录在案的死法就是
+      「重到没人愿意天天用」。</span></li>
+    <li class="n"><b>没有受众、没有分发</b>
+      <span>而按 2026 年的调研结论，<strong>受众与信任是唯一还算护城河的东西</strong>，
+      且必须用时间换、抢不回来。</span></li>
+  </ul>
+</section>
+
+<section>
+  <span class="sec-num">五 · 竞争现实</span>
+  <h2>它不是新品类，这一点必须先承认</h2>
+
+  <p class="lede">
+    所在领域叫<strong>规格驱动开发</strong>：先把「要做什么」写成文档，再让 AI 照做。
+    2026 年已主流化。
+  </p>
+
+  <div class="scroll"><table>
+    <thead><tr><th>对手</th><th>它是什么</th><th>对我们意味着</th></tr></thead>
+    <tbody>
+      <tr><td>GitHub Spec Kit</td><td>定义了标准做法</td><td>只管工程质量，<strong>不问这东西该不该做</strong></td></tr>
+      <tr><td>BMAD</td><td>多角色 ＋ 模板 ＋ 人工确认</td><td><strong>结构与本项目高度相似</strong>；被诟病重、慢、贵</td></tr>
+      <tr><td>OpenSpec</td><td>最轻的一个</td><td>用「12 分钟 vs 5.5 小时」证明了轻的价值</td></tr>
+      <tr><td>Grok Bot（SpaceXAI ＋ Cursor）</td><td>2026-08-11 发布，每个 Bot 一台云电脑，能登录你的应用干活</td><td><strong>执行层面正面打不过</strong>；$200/月/席，背后 600 亿美元收购</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="call warn">
+    <span class="call-label">及格线（必须比它更好，否则不该存在）</span>
+    <p><strong>装一个现成的执行工具 ＋ 花约 $29 买个验证工具 ＋ 两边人工对接——今天下午就能搭好。</strong></p>
+  </div>
+
+  <h3>那凭什么是我们</h3>
+  <p>只剩一条，而且它很窄：<strong>所有工具都在做「东西符不符合规格」，
+  没有一个在做「规格本身是不是定错了」。</strong></p>
+  <p><span class="tag t-i">推断</span> Grok Bot 的 Bot 只执行、不裁决。
+  但要诚实：<strong>这可能不是它做不到，是它不需要</strong>——
+  它的用户已经知道自己要什么，卡在执行；我们的用户卡在「不知道自己要什么」。
+  <strong>这是两个市场，不是同一个市场的强弱。</strong></p>
+  <p><span class="tag t-g">猜测</span> 如果它下一版加上判断层，我们的独特性会被削掉一大块。
+  <strong>这是这个方向最大的头顶风险，目前没有对策。</strong></p>
+</section>
+
+<section>
+  <span class="sec-num">六 · 落到手机</span>
+  <h2>怎么从「电脑上的工具」变成「手机上的 App」</h2>
+
+  <p class="lede">
+    先说清楚现状：<strong>MoneyLoop 现在是一个在你自己电脑上运行的命令行程序</strong>，
+    没有服务器、没有账号体系、没有客户端。要上手机，有三条路，代价差一个数量级。
+  </p>
+
+  <div class="opt rec">
+    <span class="opt-tag">路线 A · 我推荐先走这条</span>
+    <h4>电脑跑，手机看</h4>
+    <p>把 <code>docs/</code> 和看板同步到网盘或 Git，手机上直接打开那个 HTML。
+    你在外面能看到：组织图、群聊、台账、花了多少钱、进度到哪。</p>
+    <dt>要做什么</dt><dd>基本不用做——已经生成的是标准 HTML，同步一下就能看。</dd>
+    <dt>代价</dt><dd><strong>接近 0，今天就能用。</strong>缺点是只能看，不能在手机上指挥。</dd>
+  </div>
+
+  <div class="opt">
+    <span class="opt-tag">路线 B</span>
+    <h4>手机能看也能说话</h4>
+    <p>加一个轻量服务：手机上打开网页看板 ＋ 能往群聊里发话，
+    电脑那端跑着的 loop 下次开口时就会看到。</p>
+    <dt>要做什么</dt><dd>一个小服务 ＋ 一个能读写群聊文件的接口 ＋ 简单鉴权。</dd>
+    <dt>代价</dt><dd><span class="tag t-i">推断</span> 一到两周；多一个会挂的东西要维护。</dd>
+  </div>
+
+  <div class="opt">
+    <span class="opt-tag">路线 C</span>
+    <h4>真正的手机 App</h4>
+    <p>整套重写成托管服务：账号、云端执行、计费、客户端。用户不用装任何东西。</p>
+    <dt>要做什么</dt><dd>后端 ＋ 执行沙箱 ＋ 计费 ＋ App 上架，是一个完整的产品工程。</dd>
+    <dt>代价</dt><dd><span class="tag t-i">推断</span> 数月起步，且每个用户的 AI 调用成本要真金白银垫付
+      （实测单次调用 $0.15–$8.20）。</dd>
+  </div>
+
+  <div class="call warn">
+    <span class="call-label">为什么我不建议现在跳到 C</span>
+    <p><strong>付费意愿还没验证。</strong>先花几个月做 App，等于在一个未经验证的假设上
+    压上全部成本——而这正是这套系统本身设计出来要拦住的那种决定。</p>
+    <p>更稳的顺序是：<strong>A 先用起来 → 找到真实付费用户 → 再决定 B 还是 C。</strong></p>
+  </div>
+</section>
+
+<section>
+  <span class="sec-num">七 · 接下来</span>
+  <h2>三件事，按顺序</h2>
+
+  <ol class="list">
+    <li class="n"><b>验证付费意愿</b>
+      <span>整个定位架在这条猜测上。<strong>排在做任何新功能前面。</strong>
+      不需要写代码，需要的是把它给真实的「想不明白的人」看，看他们掏不掏钱。</span></li>
+    <li class="n"><b>砍重量</b>
+      <span>从可选项变成必答题——对手 12 分钟，我们还没数过自己要多久。</span></li>
+    <li class="n"><b>建受众</b>
+      <span>唯一成立的护城河，最慢、抢不回来，必须和产品并排推进而不是等做完。</span></li>
+  </ol>
+
+  <div class="call">
+    <span class="call-label">这套系统对自己的判断</span>
+    <p>它的自我诊断工具（五个镜头互相打架）对自己跑过一遍，结论是：
+    <strong>「功能更好」「效率更高」「有方法论」这三条都不是护城河</strong>——
+    功能能被抄且以天计；效率是内部过程，用户摸不到；方法论抄一遍就走。</p>
+    <p><strong>唯一成立的是用户信任与受众，而那一条目前是 0。</strong></p>
+  </div>
+</section>
+
+<hr>
+<footer>
+  <p>数据截至 2026-08-13，全部来自实际运行记录与代码统计。
+  标注约定：<span class="tag t-f">事实</span> 有来源能核对 ·
+  <span class="tag t-i">推断</span> 从材料推的 ·
+  <span class="tag t-g">猜测</span> 就是猜的，附「错了会怎样」。<br>
+  使用说明书见仓库 <code>README.md</code>；组织架构见 <code>references/组织架构.md</code>。</p>
+</footer>
+
+</div>
