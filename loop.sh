@@ -455,6 +455,42 @@ _run_director() {
 cmd_dispatch() { _run_director "派单 · 把 CEO 的决策拆成每个人的活" 派单 "11-派工单.md"; }
 cmd_roster()   { _run_director "排班 · 今天每个人做什么" 排班 "12-排班.md"; }
 
+# CEO 设计专家团：先想清楚这个项目缺哪几块判断，再照缺口去找人。
+#
+# 为什么这一步必须有：行业专家擅长查，但他不知道这个项目缺什么。
+# 不给方向，他会按惯性去找"这行最有名的人"——
+# 而最有名的人 ≠ 对我们最有用的人。
+# 实测教训：没有这一步，找回来的全是网红，有故事没体系，
+# 成功还高度依赖那个年代的平台红利，拿到手根本没法用。
+cmd_panel_design() {
+  [ -f "$CMD_DIR/专家团.md" ] || die "缺少 .claude/commands/专家团.md"
+  title "CEO 设计专家团"
+  say "${C_DIM}先定缺哪几块判断，再照缺口点名要什么样的专家${C_OFF}"
+  rule
+
+  local ctx=()
+  [ -f "$DOC_DIR/00-目标.md" ]      && ctx+=("$DOC_DIR/00-目标.md")
+  [ -f "$DOC_DIR/02-共性与独特.md" ] && ctx+=("$DOC_DIR/02-共性与独特.md")
+  [ -f "$DOC_DIR/05-我不懂的.md" ]   && ctx+=("$DOC_DIR/05-我不懂的.md")
+  [ -f "$GROUP_CHAT" ]              && ctx+=("$GROUP_CHAT")
+
+  local rc=0
+  claude_run "$CMD_DIR/专家团.md" "${ctx[@]+"${ctx[@]}"}" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  if [ "$rc" -ne 0 ]; then report_failure "$rc" "设计专家团的时候出错了"; return $?; fi
+
+  rule
+  if [ -f "$DOC_DIR/13-专家团设计.md" ]; then
+    ok "写好了：${C_BOLD}docs/13-专家团设计.md${C_OFF}"
+    group_say "CEO" "$(tail -25 "$LAST_LOG" 2>/dev/null)"
+    say ""
+    say "下一步：${C_BOLD}./loop.sh 行业报告 \"<议题>\"${C_OFF}（行业专家会照这份设计去找人）"
+  else
+    warn "没产出 docs/13-专家团设计.md，按没做成处理。"
+    return 1
+  fi
+}
+
 # 蒸馏：把行业报告里的真实专家，做成可以单独提问的智能体。
 #
 # 【这件事唯一可能翻车的地方】蒸馏 ≠ 把这个人复活。
@@ -615,9 +651,20 @@ cmd_industry() {
   # 你可能正在为下一个方向做调研。喂项目文档的后果实测过：
   # 它读完一堆微信工具的文档，跑去汇报那个项目的进度，
   # 完全没做该做的行业报告。上下文不是越多越好，喂错了会把人带沟里。
+  # CEO 的专家团设计如果有，就是你的作业单——照单去找，别自由发挥
   local ctx=()
+  if [ -f "$DOC_DIR/13-专家团设计.md" ]; then
+    cp "$DOC_DIR/13-专家团设计.md" "$ws/【作业单】专家团设计.md"
+    ctx+=("$ws/【作业单】专家团设计.md")
+    say "${C_DIM}照 CEO 的专家团设计去找（docs/13-专家团设计.md）${C_OFF}"
+  fi
   local instruction; instruction="$(cat <<EOF
 【这是一份行业报告的活。照你角色定义里的五步做，一步都不许省。】
+
+## 如果附了【作业单】专家团设计
+**那是 CEO 定的，照单去找，别自由发挥。**
+里面写了这个项目缺哪几块判断、每一类要找什么样的人、明确不要什么。
+**「明确不要」那一栏尤其要守住**——找回来一堆不要的，等于白花钱。
 
 议题：$topic
 
@@ -1287,7 +1334,8 @@ cmd_help() {
   ./loop.sh budget 50            设花钱上限（美元）。不设就不给跑自动
   ./loop.sh auto                 无人值守：自己往下跑，撞到闸门/预算/卡点就停
   ./loop.sh hire [名字...]       从模板招人（不写名字就看有哪些可招）
-  ./loop.sh 行业报告 "议题"       找 10 个真实操盘手的判断，一人一份落盘，综合成报告
+  ./loop.sh 专家团               CEO 定这个项目缺哪几块判断、要找什么样的专家
+  ./loop.sh 行业报告 "议题"       行业专家照 CEO 的设计去找人，一人一份落盘
   ./loop.sh 蒸馏                 把报告里的真专家做成能单独提问的智能体
   ./loop.sh 专家群 "议题"        让蒸馏出来的专家依次发言，后面的能反驳前面的
   ./loop.sh 封存 <名字>          用完收起来（不删，随时 ./loop.sh 起复）
@@ -1340,6 +1388,7 @@ main() {
     status|st) cmd_status ;;
     ceo|操盘) cmd_ceo ;;
     industry|行业报告) cmd_industry "${1:-}" ;;
+    design|专家团) cmd_panel_design ;;
     distill|蒸馏) cmd_distill ;;
     panel|专家群) cmd_expert_panel "${1:-}" ;;
     archive|封存) cmd_archive_role "${1:-}" ;;
