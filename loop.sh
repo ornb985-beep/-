@@ -1498,6 +1498,176 @@ cmd_provider() {
   return 0
 }
 
+# ---------- 论证：十个专家把「这事到底成不成」查一遍 ----------
+#
+# 分两轮，这是这条命令的核心设计：
+#   先跑的四个【联网查】真实数据；后跑的六个【看着查回来的数据做判断】。
+#
+# 为什么不是十个人一起上：十个人各查各的，会得到十份互相打架的数字，
+# 而且没有裁判。先查后判，判断的人是看着【同一份】真实数据在判断。
+# 顺带还便宜——只有四个人要联网，联网那几次才是贵的。
+LUN_ZHENG_FILE="$DOC_DIR/00-论证.md"
+LZ_RESEARCH="${LZ_RESEARCH:-行研 增长 竞品 技术}"
+LZ_JUDGE="${LZ_JUDGE:-财务 战略 产品 合规 运营 风控}"
+
+lz_deliverable() { echo "$WORK_DIR/$1/论证.md"; }
+
+# 跑一个专家。已经交过东西的跳过——预算中途用完了能接着跑，不用从头来。
+lz_one() {
+  local who="$1" round="$2"; shift 2
+  local out; out="$(lz_deliverable "$who")"
+
+  if [ -f "$out" ]; then
+    say "  ${C_DIM}$who 已经交过了，跳过（想重跑就删掉 ${out#"$ROOT/"}）${C_OFF}"
+    return 0
+  fi
+  if [ ! -f "$(role_file "$who")" ]; then
+    warn "  「$who」不在岗，跳过。（招他：./loop.sh hire $who）"
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$out")"
+  local q
+  q="$(printf '%s\n' \
+    "读 docs/00-论证.md 里的作业单，找到写着【$who】的那一节。" \
+    "" \
+    "**你只答那一个问题。别人的活不许碰**——十个人各答各的，重叠了就等于没分工。" \
+    "" \
+    "$( [ "$round" = 查 ] \
+        && printf '%s' "你这一轮要【联网查真实数据】。查不到就写「查不到」，**绝对不许编**。每个数字必须带来源链接和日期。" \
+        || printf '%s' "先跑的几个人已经把真实数据查回来了（在上面的上下文里）。你这一轮【不用联网】，看着他们查回来的数据做判断。" )" \
+    "" \
+    "把结果写进 **$out**，格式：" \
+    "" \
+    "## 我负责的问题" \
+    "## 结论（一句话）" \
+    "## 依据" \
+    "　每条标 [事实|推断|猜测]。[事实] 必须有来源和日期，没有就降级成 [推断]。" \
+    "## 对应哪几条承重条件" \
+    "　写编号，并给出每条应该标成：已验证 / 未验证 / 已证伪" \
+    "## 我这份里最靠不住的一点" \
+    "　必写。一份看不出哪儿靠不住的意见书，是危险，不是专业。" )"
+
+  info "  $who …"
+  local rc=0
+  NO_GROUP_CHAT=1 ROLE_ISOLATED=1 ROLE_CWD="$WORK_DIR/$who" \
+    ask_role "$who" "$q" "$@" >/dev/null 2>&1 || rc=$?
+
+  # 「跑过」不等于「交了东西」。文件不在就是没交，不许记成功。
+  if [ -f "$out" ]; then
+    ok "  $who 交了"
+    group_say "$who" "$(head -25 "$out")"
+  else
+    warn "  $who 没交东西（退出码 $rc）"
+    local b; b="$(blocker_reason "$LAST_LOG" || true)"
+    [ -n "$b" ] && { say "  ${C_DIM}${b#*	}${C_OFF}"; return 2; }
+  fi
+  return 0
+}
+
+cmd_argue() {
+  [ -f "$DOC_DIR/00-目标.md" ] || die "得先有目标草案。跑 ./loop.sh go 把第2步跑出来。"
+
+  local missing=""
+  local who
+  for who in $LZ_RESEARCH $LZ_JUDGE; do
+    [ -f "$(role_file "$who")" ] || missing="$missing $who"
+  done
+  if [ -n "$missing" ]; then
+    rule
+    warn "论证团还差人：$missing"
+    say  "先招齐：${C_BOLD}./loop.sh hire$missing${C_OFF}"
+    say  ""
+    say  "${C_DIM}这一步是十个专家把「这事到底成不成」查一遍，人不齐就有盲区。${C_OFF}"
+    rule
+    return 1
+  fi
+
+  local b; b="$(budget_get)"
+  if [ -z "$b" ]; then
+    warn "这一步会调用十几次 AI，是这套东西里最贵的一步。"
+    say  "先设个上限：${C_BOLD}./loop.sh budget 30${C_OFF}　${C_DIM}（到顶会自动停，已经交的不会白跑）${C_OFF}"
+    return 1
+  fi
+
+  local start; start="$(cost_total)"
+
+  # ── 一、CEO 出作业单 ────────────────────────────────
+  if [ ! -f "$LUN_ZHENG_FILE" ]; then
+    title "论证 · 第一步：CEO 把议题拆成十个不重叠的窄问题"
+    rule
+    local rc=0
+    claude_run "$CMD_DIR/论证作业单.md" \
+      "$DOC_DIR/00-听到的.md" "$DOC_DIR/00-目标.md" || rc=$?
+    [ "$rc" -eq 3 ] && return 0
+    [ "$rc" -ne 0 ] && { report_failure "$rc" "出作业单的时候出错了"; return $?; }
+    [ -f "$LUN_ZHENG_FILE" ] || {
+      warn "没产出 $(basename "$LUN_ZHENG_FILE")，按没做成处理。"; return 1; }
+    ok "作业单出来了：${LUN_ZHENG_FILE#"$ROOT/"}"
+  else
+    say "${C_DIM}作业单已经有了，接着往下跑。${C_OFF}"
+  fi
+
+  local ctx=("$DOC_DIR/00-目标.md" "$LUN_ZHENG_FILE")
+  [ -f "$DOC_DIR/00-听到的.md" ] && ctx=("$DOC_DIR/00-听到的.md" "${ctx[@]}")
+
+  # ── 二、先跑：联网查真实数据 ────────────────────────
+  rule
+  title "论证 · 第二步：四个人去查真实数据（这几次要联网，是贵的那部分）"
+  for who in $LZ_RESEARCH; do
+    lz_one "$who" 查 "${ctx[@]}" || { warn "停在这儿了。恢复之后再跑一次 ./loop.sh 论证"; return 2; }
+  done
+
+  # ── 三、后跑：看着查回来的数据做判断 ────────────────
+  rule
+  title "论证 · 第三步：六个人看着这些数据做判断（不联网，便宜）"
+  local jctx=("${ctx[@]}")
+  for who in $LZ_RESEARCH; do
+    local d; d="$(lz_deliverable "$who")"
+    [ -f "$d" ] && jctx+=("$d")
+  done
+  for who in $LZ_JUDGE; do
+    lz_one "$who" 判 "${jctx[@]}" || { warn "停在这儿了。恢复之后再跑一次 ./loop.sh 论证"; return 2; }
+  done
+
+  # ── 四、CEO 综合，算可行性 ──────────────────────────
+  rule
+  title "论证 · 第四步：CEO 综合十份意见，算可行性"
+  local actx=("${jctx[@]}")
+  for who in $LZ_JUDGE; do
+    local d; d="$(lz_deliverable "$who")"
+    [ -f "$d" ] && actx+=("$d")
+  done
+  local rc=0
+  claude_run "$CMD_DIR/论证综合.md" "${actx[@]}" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  [ "$rc" -ne 0 ] && { report_failure "$rc" "综合的时候出错了"; return $?; }
+
+  # ── 五、把一页纸打给他看 ────────────────────────────
+  rule
+  local page; page="$(lz_onepager)"
+  if [ -n "$page" ]; then
+    printf '%s\n' "$page"
+  else
+    warn "没找到「给你的一页纸」那一节，完整的在 ${LUN_ZHENG_FILE#"$ROOT/"}"
+  fi
+  rule
+  local endc; endc="$(cost_total)"
+  say "这一轮花了 ${C_BOLD}\$$(awk -v a="$start" -v b="$endc" 'BEGIN{printf "%.2f", b-a}')${C_OFF}"
+  say "完整的十份意见：${C_BOLD}work/<名字>/论证.md${C_OFF}　汇总：${C_BOLD}${LUN_ZHENG_FILE#"$ROOT/"}${C_OFF}"
+  say ""
+  say "${C_DIM}想重跑某个人：删掉他那份 work/<名字>/论证.md，再跑一次 ./loop.sh 论证${C_OFF}"
+  return 0
+}
+
+# 把「给你的一页纸」那一节摘出来。问题和结论在文档中间，不摘的话人得自己翻。
+lz_onepager() {
+  [ -f "$LUN_ZHENG_FILE" ] || return 0
+  awk '/^##[[:space:]]*给你的一页纸/ { on=1 }
+       on && /^##[[:space:]]*承重条件核对表/ { exit }
+       on { print }' "$LUN_ZHENG_FILE" 2>/dev/null
+}
+
 # 看看现在都有哪些角色，各自聊过几次
 cmd_roles() {
   local rs; rs="$(roles_list)"
@@ -1676,6 +1846,7 @@ cmd_help() {
   ./loop.sh 蒸馏                 把报告里的真专家做成能单独提问的智能体
   ./loop.sh 专家群 "议题"        让蒸馏出来的专家依次发言，后面的能反驳前面的
   ./loop.sh 封存 <名字>          用完收起来（不删，随时 ./loop.sh 起复）
+  ./loop.sh 论证                 十个专家把「这事到底成不成」查一遍，给可行性判定
   ./loop.sh 会诊 "议题"          CEO 判断该问谁 → 逐个咨询 → 综合裁决
   ./loop.sh 派单                 执行总监把 CEO 的决策拆成每个人的活
   ./loop.sh 排班                 执行总监定今天每个员工做什么
@@ -1743,6 +1914,7 @@ main() {
     assign|派活) cmd_assign "${1:-}" "${2:-}" ;;
     review|验收) cmd_review ;;
     ledger|台账) cmd_board ;;
+    argue|论证) cmd_argue ;;
     provider|接口|换脑子) cmd_provider "${1:-}" "${2:-}" "${3:-}" ;;
     auto|自动) cmd_auto ;;
     budget|预算) cmd_budget "${1:-}" ;;

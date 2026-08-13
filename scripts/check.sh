@@ -149,6 +149,13 @@ if [ -f scripts/test-听懂.sh ]; then
   run "第1步 听懂（引导式问答 ＋ 十步清单不漂移）" bash scripts/test-听懂.sh
 fi
 
+# 论证：十个专家把「这事到底成不成」查一遍。
+# 里面第一条测的是「角色到底收没收到自己的身份和问题」——
+# 那条曾经悄悄坏了，每个角色只收到了自己定义的第一行。
+if [ -f scripts/test-论证.sh ]; then
+  run "论证（十个专家 ＋ 角色真收到了提示词）" bash scripts/test-论证.sh
+fi
+
 # ---------------- 项目自定义检查 ----------------
 if [ -f check.local.sh ]; then
   run "项目自定义检查" bash check.local.sh
