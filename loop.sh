@@ -1529,6 +1529,86 @@ cmd_provider() {
   return 0
 }
 
+# ---------- 审美：给他看真东西，从他的选择里反推他的审美 ----------
+#
+# 不许问「你喜欢什么风格」——他答不上来，没人答得上来。
+# 他看到了能判断，闭着眼描述不出来，这是两回事。
+AESTHETIC_FILE="$DOC_DIR/00-审美.md"
+
+cmd_aesthetic() {
+  [ -f "$BLUEPRINT_FILE" ] || die "先把蓝图画出来：./loop.sh 蓝图"
+  if [ ! -f "$(role_file 前端审美)" ]; then
+    [ -f "$ROOT/roles-模板/前端审美.md" ] || die "缺少 roles-模板/前端审美.md"
+    mkdir -p "$ROLE_DIR"; cp "$ROOT/roles-模板/前端审美.md" "$(role_file 前端审美)"
+    ok "把前端审美专家请进来了"
+  fi
+
+  title "审美"
+  say "${C_DIM}不问你喜欢什么风格——给你看真东西，从你的选择里反推。${C_OFF}"
+  rule
+
+  local ctx=("$BLUEPRINT_FILE")
+  [ -f "$DOC_DIR/00-镜子.md" ] && ctx+=("$DOC_DIR/00-镜子.md")
+  [ -f "$AESTHETIC_FILE" ] && ctx+=("$AESTHETIC_FILE")
+  local kb; kb="$(kb_files)"
+  [ -n "$kb" ] && while IFS= read -r f; do [ -n "$f" ] && ctx+=("$f"); done <<< "$kb"
+
+  local q
+  q="$(printf '%s\n' \
+    "照你的规矩来一轮，写进 $AESTHETIC_FILE。" \
+    "" \
+    "**参照物必须联网查证，是他能当场打开看的真东西，带链接和查证日期。**" \
+    "凭印象说某个产品长什么样——你记忆里那一版可能是三年前的，人家早改了。" \
+    "" \
+    "三个方向，每个都要写到能想象出画面，而且都要有代价。" \
+    "然后只问他一个场景题（不问偏好），再加那道「一年后他朋友会怎么说」。" )"
+
+  local rc=0
+  ROLE_ISOLATED=1 ask_role 前端审美 "$q" "${ctx[@]}" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  if [ "$rc" -ne 0 ]; then report_failure "$rc" "挑审美的时候出错了"; return $?; fi
+  [ -f "$AESTHETIC_FILE" ] || { rule; warn "没产出 $(basename "$AESTHETIC_FILE")，按没做成处理。"; return 1; }
+
+  rule
+  ok "三个方向在 ${C_BOLD}${AESTHETIC_FILE#"$ROOT/"}${C_OFF}"
+  say ""
+  say "${C_DIM}挑一个：./loop.sh ask 前端审美 \"我选 B\"${C_OFF}"
+  say "${C_DIM}它会从你的选择里反推出一句你的审美标准，以后所有界面取舍都拿那句判。${C_OFF}"
+  rule
+}
+
+# ---------- 落地手册：一步一步带他做出来，含所有要花钱的点 ----------
+cmd_manual() {
+  [ -f "$BLUEPRINT_FILE" ] || die "先把蓝图画出来：./loop.sh 蓝图"
+  local b; b="$(budget_get)"
+  [ -z "$b" ] && { warn "这一步要联网查一堆价格。先设个上限：./loop.sh budget 20"; return 1; }
+
+  title "落地手册"
+  say "${C_DIM}一步一步、含所有要花钱的点。写给一个完全不会写代码的人看。${C_OFF}"
+  rule
+
+  local ctx=("$BLUEPRINT_FILE")
+  local f
+  for f in "$AESTHETIC_FILE" "$DOC_DIR/06-技术与落地.md" "$DOC_DIR/00-论证.md"; do
+    [ -f "$f" ] && ctx+=("$f")
+  done
+
+  local rc=0
+  claude_run "$CMD_DIR/落地手册.md" "${ctx[@]}" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  if [ "$rc" -ne 0 ]; then report_failure "$rc" "写手册的时候出错了"; return $?; fi
+  local out="$DOC_DIR/08-落地手册.md"
+  [ -f "$out" ] || { rule; warn "没产出 08-落地手册.md，按没做成处理。"; return 1; }
+
+  rule
+  ok "手册在 ${C_BOLD}${out#"$ROOT/"}${C_OFF}"
+  say ""
+  awk '/^##[[:space:]]*这事一共要花多少钱/ { on=1 } on && /^##[[:space:]]*上架/ { exit } on { print }' "$out" 2>/dev/null | head -24
+  rule
+  say "${C_DIM}里面有几条路可选，每条都写了代价和死法。选好了敲 ./loop.sh go${C_OFF}"
+  rule
+}
+
 # ---------- 蓝图：一直改到他说「对，这就是我要做的」 ----------
 #
 # 这是个【收敛循环】，跟第1步「听懂」用的是同一套机制（round_* 那几个）：
@@ -2102,6 +2182,8 @@ cmd_help() {
   ./loop.sh 蓝图                 画产品蓝图：形态/功能/技术/时间表，一直改到你说「就是它了」
   ./loop.sh 改 "A"               回答蓝图的问题，或者说哪儿不对
   ./loop.sh 定了                 对，这就是我要做的（蓝图锁定）
+  ./loop.sh 审美                 给你看真东西，从你的选择里反推出你的审美标准
+  ./loop.sh 手册                 一步一步带你做出来，含所有要花钱的点
   ./loop.sh 照镜子               动手之前，先看清你到底想要什么（只用你自己的话当镜子）
   ./loop.sh 论证                 十个专家把「这事到底成不成」查一遍，给可行性判定
   ./loop.sh 会诊 "议题"          CEO 判断该问谁 → 逐个咨询 → 综合裁决
@@ -2171,6 +2253,8 @@ main() {
     assign|派活) cmd_assign "${1:-}" "${2:-}" ;;
     review|验收) cmd_review ;;
     ledger|台账) cmd_board ;;
+    aesthetic|审美) cmd_aesthetic ;;
+    manual|手册|落地手册) cmd_manual ;;
     blueprint|蓝图) cmd_blueprint ;;
     revise|改) cmd_blueprint_answer "${1:-}" ;;
     lock|定了) cmd_blueprint_lock ;;
