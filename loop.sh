@@ -1529,6 +1529,136 @@ cmd_provider() {
   return 0
 }
 
+# ---------- 上线评审 ＋ 运营期 ----------
+#
+# 结构照搬「启蒙」那一套：一人一块、各自落盘、产物不在就是没交、可重跑。
+LAUNCH_FILE="$DOC_DIR/09-上线.md"
+LAUNCH_PANEL="${LAUNCH_PANEL:-营销大师 MVP大师 商业专家}"
+LEDGER="$STATE_DIR/账本.tsv"
+
+cmd_launch() {
+  [ -f "$BLUEPRINT_FILE" ] || die "先把蓝图画出来：./loop.sh 蓝图"
+  local b; b="$(budget_get)"
+  [ -z "$b" ] && { warn "先设个上限：./loop.sh budget 20"; return 1; }
+
+  local who
+  for who in $LAUNCH_PANEL; do
+    [ -f "$(role_file "$who")" ] || { mkdir -p "$ROLE_DIR"; cp "$ROOT/roles-模板/$who.md" "$(role_file "$who")"; }
+  done
+
+  title "上线评审"
+  say "${C_DIM}三个人各查一块，CEO 拍板能不能上。三道闸有一道不过就不许上。${C_OFF}"
+  rule
+
+  local ctx=("$BLUEPRINT_FILE")
+  local f
+  for f in "$DOC_DIR/00-目标.md" "$DOC_DIR/00-论证.md" "$LISTEN_FILE"; do
+    [ -f "$f" ] && ctx+=("$f")
+  done
+
+  for who in $LAUNCH_PANEL; do
+    local out; out="$WORK_DIR/$who/$( [ "$who" = 营销大师 ] && echo 方案 || { [ "$who" = MVP大师 ] && echo 砍完的 || echo 账; } ).md"
+    if [ -f "$out" ]; then say "  ${C_DIM}$who 已经交过了，跳过${C_OFF}"; continue; fi
+    mkdir -p "$(dirname "$out")"
+    info "  $who …"
+    local rc=0
+    NO_GROUP_CHAT=1 ROLE_ISOLATED=1 ROLE_CWD="$WORK_DIR/$who" \
+      ask_role "$who" "照你的规矩做一轮，写进 $out。每个数字标 [事实|推断|猜测]，能查的必须查。" \
+      "${ctx[@]}" >/dev/null 2>&1 || rc=$?
+    if [ -f "$out" ]; then ok "  $who 交了"; group_say "$who" "$(head -20 "$out")"
+    else warn "  $who 没交东西（退出码 $rc）"; fi
+  done
+
+  rule
+  title "CEO 拍板"
+  local actx=("${ctx[@]}")
+  for f in "$WORK_DIR"/营销大师/*.md "$WORK_DIR"/MVP大师/*.md "$WORK_DIR"/商业专家/*.md; do
+    [ -f "$f" ] && actx+=("$f")
+  done
+  [ -f "$ROOT/references/判断标准.md" ] && actx+=("$ROOT/references/判断标准.md")
+  local rc=0
+  claude_run "$CMD_DIR/上线评审.md" "${actx[@]}" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  if [ "$rc" -ne 0 ]; then report_failure "$rc" "上线评审出错了"; return $?; fi
+  [ -f "$LAUNCH_FILE" ] || { rule; warn "没产出 09-上线.md，按没做成处理。"; return 1; }
+
+  rule
+  ok "评审结果在 ${C_BOLD}${LAUNCH_FILE#"$ROOT/"}${C_OFF}"
+  awk '/^##[[:space:]]*上线前三道闸/ { on=1 } on && /^##[[:space:]]*需要你定/ { print; exit } on { print }' \
+    "$LAUNCH_FILE" 2>/dev/null | head -14
+  rule
+  say "${C_DIM}定止损线和投入：./loop.sh 止损 \"到6月还没有10个付费用户就停\"${C_OFF}"
+  say "${C_DIM}上线之后每天：./loop.sh 日报　　看仪表盘：./loop.sh 看板${C_OFF}"
+  rule
+}
+
+# 止损线 ＋ 投入 —— 他只需要定这两个
+cmd_stoploss() {
+  local text="${1:-}"
+  if [ -z "$text" ]; then
+    title "止损线"
+    say "现在：$(state_get 止损线 "${C_YELLOW}还没定${C_OFF}")"
+    say "投入上限：\$$(budget_get)"
+    say ""
+    say "定一条：${C_BOLD}./loop.sh 止损 \"到6月底还没有10个付费用户就停，然后改方向\"${C_OFF}"
+    say "${C_DIM}必须是【一个日期 ＋ 一个可数的事实】。没有出口的止损线，人会一直答"还没到"。${C_OFF}"
+    return 0
+  fi
+  state_set 止损线 "$text"
+  ok "记下了：$text"
+  say "${C_DIM}每天的日报会拿这条对一次，快到了会提前叫你。${C_OFF}"
+}
+
+# 记账 —— 收入支出，日报和仪表盘都读它
+cmd_ledger() {
+  local kind="${1:-}" amt="${2:-}" note="${3:-}"
+  if [ -z "$kind" ]; then
+    title "账本"
+    if [ -f "$LEDGER" ]; then
+      awk -F'\t' 'NR>1 { if ($2=="收") inc+=$3; else exp+=$3 }
+        END { printf "  收入 %.2f　支出 %.2f　净 %.2f\n", inc, exp, inc-exp }' "$LEDGER"
+      say ""; tail -8 "$LEDGER" | awk -F'\t' '{printf "  %s  %s %8s  %s\n",$1,$2,$3,$4}'
+    else say "  还没记过账"; fi
+    say ""
+    say "记一笔：${C_BOLD}./loop.sh 记账 收 500 \"第一单\"${C_OFF}　${C_BOLD}./loop.sh 记账 支 30 \"服务器\"${C_OFF}"
+    return 0
+  fi
+  case "$kind" in 收|支) ;; *) die "第一个参数只能是 收 或 支" ;; esac
+  [ -n "$amt" ] || die '用法：./loop.sh 记账 收 500 "第一单"'
+  mkdir -p "$STATE_DIR"
+  [ -f "$LEDGER" ] || printf '日期\t收支\t金额\t说明\n' > "$LEDGER"
+  printf '%s\t%s\t%s\t%s\n' "$(date '+%Y-%m-%d')" "$kind" "$amt" "$note" >> "$LEDGER"
+  ok "记下了：$kind $amt $note"
+}
+
+# 日报 —— 上线之后每天一份，他只看这个
+cmd_daily_report() {
+  [ -f "$LAUNCH_FILE" ] || die "还没上线。先跑 ./loop.sh 上线"
+  title "日报"
+  rule
+  local ctx=("$LAUNCH_FILE")
+  [ -f "$LEDGER" ] && ctx+=("$LEDGER")
+  [ -f "$DOC_DIR/10-群聊.md" ] && ctx+=("$DOC_DIR/10-群聊.md")
+
+  local tmp="$STATE_DIR/日报.md"
+  { printf '你是 CEO。给老板写今天的日报。\n\n'
+    printf '**他只看这一份，所以只写一页，写他能立刻做决定的东西。**\n'
+    printf '说话见 references/怎么说话.md：不许出现商业术语。\n\n'
+    printf '止损线：%s\n投入上限：$%s　已花：$%s\n\n' \
+      "$(state_get 止损线 '（还没定）')" "$(budget_get)" "$(cost_total)"
+    printf '格式：\n## 今天\n（一句话：好了还是坏了）\n\n'
+    printf '## 数\n收入__ 支出__ 净__ ｜ 离止损线还有__\n\n'
+    printf '## 要你拍板的\n（没有就写「没有，你不用管」）\n\n'
+    printf '## 我们明天干什么\n（三条以内）\n'
+  } > "$tmp"
+  local rc=0
+  claude_run "$tmp" "${ctx[@]}" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  [ "$rc" -ne 0 ] && { report_failure "$rc" "写日报的时候出错了"; return $?; }
+  rule
+  say "${C_DIM}完整仪表盘：./loop.sh 看板${C_OFF}"
+}
+
 # ---------- 启蒙：四位大师各说一块，拧成几个能选的方向 ----------
 #
 # 结构照搬「论证」那一套（lz_one 那个路子）：一人一块不重叠、
@@ -2264,6 +2394,10 @@ cmd_help() {
   ./loop.sh 启蒙                 四位大师（美学/哲学/历史人文/精神意识）拧出几个方向，细到按钮
   ./loop.sh 审美                 给你看真东西，从你的选择里反推出你的审美标准
   ./loop.sh 手册                 一步一步带你做出来，含所有要花钱的点
+  ./loop.sh 上线                 上线前最后一关：三道闸 + CEO 拍板 + 接管运营
+  ./loop.sh 止损 "到6月..."      定止损线（一个日期 + 一个可数的事实）
+  ./loop.sh 记账 收 500 "第一单"  记收支，日报和仪表盘都读它
+  ./loop.sh 日报                 上线之后每天一份，你只看这个
   ./loop.sh 照镜子               动手之前，先看清你到底想要什么（只用你自己的话当镜子）
   ./loop.sh 论证                 十个专家把「这事到底成不成」查一遍，给可行性判定
   ./loop.sh 会诊 "议题"          CEO 判断该问谁 → 逐个咨询 → 综合裁决
@@ -2333,6 +2467,10 @@ main() {
     assign|派活) cmd_assign "${1:-}" "${2:-}" ;;
     review|验收) cmd_review ;;
     ledger|台账) cmd_board ;;
+    launch|上线) cmd_launch ;;
+    stoploss|止损) cmd_stoploss "${1:-}" ;;
+    ledger|记账) cmd_ledger "${1:-}" "${2:-}" "${3:-}" ;;
+    report|日报) cmd_daily_report ;;
     enlighten|启蒙) cmd_enlighten ;;
     aesthetic|审美) cmd_aesthetic ;;
     manual|手册|落地手册) cmd_manual ;;

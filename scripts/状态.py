@@ -123,6 +123,25 @@ def read_all(root):
 
     budget = rd(os.path.join(L, "budget"), "").strip()
 
+    # ---------- 账本（上线之后的真金白银，跟 AI 调用费是两回事）----------
+    inc = exp = 0.0
+    led = []
+    for i, line in enumerate(rdl(os.path.join(L, "账本.tsv"))):
+        if i == 0:
+            continue
+        q = line.split("\t")
+        if len(q) >= 3:
+            try:
+                v = float(q[2])
+            except ValueError:
+                continue
+            if q[1] == "收":
+                inc += v
+            else:
+                exp += v
+            led.append(dict(date=q[0], kind=q[1], amount=v,
+                            note=q[3] if len(q) >= 4 else ""))
+
     # ---------- 人 ----------
     on = _roles_in(root, os.path.join(L, "roles"))
     arch = _roles_in(root, os.path.join(L, "封存"))
@@ -192,6 +211,9 @@ def read_all(root):
         closed=rd(os.path.join(L, "closed"), "no").strip() == "yes",
         started=os.path.isdir(L) and bool(rd(os.path.join(L, "stage")).strip()),
         budget=budget, spent=round(spent, 4),
+        income=round(inc, 2), outgo=round(exp, 2), net=round(inc - exp, 2),
+        ledger=led[-30:],
+        stoploss=rd(os.path.join(L, "止损线"), "").strip(),
         cost_rows=cost_rows[-200:],
         by_who=sorted(by_who.items(), key=lambda x: -x[1]),
         off_providers=off,

@@ -171,6 +171,44 @@ if off_providers:
         '美元数是按官方价目表折算的，不是你真付的钱。真实花费去那家后台看。'
         '</td></tr>')
 
+# ---------- 上线之后的真账（跟 AI 调用费是两回事，不许混）----------
+inc = exp = 0.0
+led = []
+for i, line in enumerate(rdl(os.path.join(L, "账本.tsv"))):
+    if i == 0:
+        continue
+    q = line.split("\t")
+    if len(q) >= 3:
+        try:
+            v = float(q[2])
+        except ValueError:
+            continue
+        if q[1] == "收":
+            inc += v
+        else:
+            exp += v
+        led.append((q[0], q[1], v, q[3] if len(q) >= 4 else ""))
+net = inc - exp
+stoploss = rd(os.path.join(L, "止损线"), "").strip()
+
+biz_html = ""
+if led or stoploss:
+    rows = "".join(
+        f'<tr><td class="num">{e(d)}</td>'
+        f'<td style="color:{"var(--ok)" if k=="收" else "var(--ink3)"}">{e(k)}</td>'
+        f'<td class="num">{v:.2f}</td><td class="dim">{e(n[:28])}</td></tr>'
+        for d, k, v, n in reversed(led[-12:])) or \
+        '<tr><td colspan="4" class="empty">还没记过账</td></tr>'
+    sl = f'<div class="warnrow">止损线：{e(stoploss)}</div>' if stoploss else \
+         '<div class="warnrow">还没定止损线 —— <code>./loop.sh 止损 "…"</code></div>'
+    biz_html = (
+        '<div class="card"><h2>生意怎么样（上线之后的真账）</h2>'
+        f'<div class="kpi" style="margin-bottom:12px">'
+        f'<div class="k ok"><b>{inc:.0f}</b><span>收入</span></div>'
+        f'<div class="k"><b>{exp:.0f}</b><span>支出</span></div>'
+        f'<div class="k {"ok" if net >= 0 else "warn"}"><b>{net:.0f}</b><span>净</span></div>'
+        f'</div>{sl}<table>{rows}</table></div>')
+
 bud = f'{spent:.2f} / {budget}' if budget else f'{spent:.2f}（没设上限）'
 bud_pct = pct(spent, float(budget)) if budget else 0
 
@@ -269,6 +307,7 @@ td{{padding:6px 5px;border-bottom:1px solid var(--line);vertical-align:top}}
   </div>
 
   <div>
+    {biz_html}
     <div class="card"><h2>派活台账</h2><table>{task_html}</table></div>
     <div class="card"><h2>钱花在谁身上（共 ${spent:.2f} / {len(cost_rows)} 次）</h2><table>{cost_html}</table></div>
   </div>
