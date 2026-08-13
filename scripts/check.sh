@@ -135,6 +135,14 @@ if [ "${#SH[@]}" -gt 0 ]; then
   if [ "$syn_ok" = 1 ]; then printf '[通过] Shell 语法\n'; else FAILED=1; fi
 fi
 
+# ---------------- MoneyLoop 自己的检查 ----------------
+# 「每个员工是不是真的一个独立接口」。
+# 这条必须每次都跑：换接口最坏的失败方式不是报错，是【看起来换了其实没换】——
+# 你以为在用便宜的，其实一直在烧贵的，而且账面上看不出来。
+if [ -f scripts/test-接口.sh ]; then
+  run "接口隔离（每个员工一个独立接口）" bash scripts/test-接口.sh
+fi
+
 # ---------------- 项目自定义检查 ----------------
 if [ -f check.local.sh ]; then
   run "项目自定义检查" bash check.local.sh

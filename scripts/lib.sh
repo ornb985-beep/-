@@ -10,6 +10,23 @@ else
   C_BOLD=""; C_DIM=""; C_RED=""; C_GREEN=""; C_YELLOW=""; C_BLUE=""; C_OFF=""
 fi
 
+# 中英混排的表格对齐。
+#
+# printf 的 %-12s 是按【字节】补空格的，一个汉字 3 字节但只占 2 格，
+# 所以只要一列里同时有中文和英文，表格必歪。这个函数按【显示宽度】补。
+#
+# 算法：设总字节 B、其中 ASCII 字节 A，则汉字个数 =(B-A)/3，
+# 显示宽度 = A + 2*(B-A)/3。（表情符号是 4 字节，会略微算偏，
+# 角色名里没有表情，够用。）
+pad() {
+  local s="$1" want="${2:-0}" b a w i
+  b=$(printf '%s' "$s" | LC_ALL=C wc -c)
+  a=$(printf '%s' "$s" | LC_ALL=C tr -cd '\000-\177' | LC_ALL=C wc -c)
+  w=$(( a + 2 * (b - a) / 3 ))
+  printf '%s' "$s"
+  for ((i=w; i<want; i++)); do printf ' '; done
+}
+
 say()   { printf '%s\n' "$*"; }
 info()  { printf '%s▸%s %s\n' "$C_BLUE" "$C_OFF" "$*"; }
 ok()    { printf '%s✓%s %s\n' "$C_GREEN" "$C_OFF" "$*"; }
@@ -214,9 +231,15 @@ budget_ok() {
 cost_record() {
   local what="$1" cost="$2" ms="$3"
   mkdir -p "$STATE_DIR"
-  [ -f "$COST_LOG" ] || printf '时间\t干什么\t花了(美元)\t用时(秒)\n' > "$COST_LOG"
-  printf '%s\t%s\t%s\t%s\n' \
-    "$(date '+%Y-%m-%d %H:%M')" "$what" "${cost:-0}" "$(( ${ms:-0} / 1000 ))" >> "$COST_LOG"
+  [ -f "$COST_LOG" ] || printf '时间\t干什么\t花了(美元)\t用时(秒)\t接口\n' > "$COST_LOG"
+  # 第5列记「这一笔走的谁家接口」。
+  #
+  # 为什么必须记：这个美元数是 claude 自己按【官方价目表】算出来的。
+  # 走别家接口（比如 DeepSeek）时，它照样会报一个数，但那个数是错的——
+  # 它不知道别家收多少钱。不标出来的话，账面上会凭空冒出一笔假账。
+  printf '%s\t%s\t%s\t%s\t%s\n' \
+    "$(date '+%Y-%m-%d %H:%M')" "$what" "${cost:-0}" "$(( ${ms:-0} / 1000 ))" \
+    "${LOOP_PROVIDER:-官方}" >> "$COST_LOG"
 }
 
 # ---------- 角色（操盘手 / 专家 / CEO 招的人）----------
@@ -356,6 +379,111 @@ role_model() {
 }
 role_env() { echo "$ROLE_DIR/$1.env"; }
 
+# 这个角色在哪一层（参谋 / 执行）。模板第一行写着「层：参谋」。
+role_layer() {
+  local rf; rf="$(role_file "$1")"
+  grep -m1 -E '^层(:|：)' "$rf" 2>/dev/null | sed -E 's/^层(:|：)[[:space:]]*//' || true
+}
+
+# ---------- 接口：每个员工用谁家的脑子 ----------
+#
+# 一个员工 = 一个独立智能体 = 自己的会话 + 自己的工作目录 + 【自己的接口】。
+# 这三样分开，是"21 个角色"和"一个人格分裂的 AI"的区别。
+#
+# 换脑子只改一个文件：.loop/roles/<名字>.env，只影响他一个人。
+# 调用他的时候在【子 shell 里】source 进去，跑完就没了，不污染别人。
+PROVIDER_DIR="$STATE_DIR/接口"
+
+# 供应商清单：代号|显示名|接口地址|主力模型|快模型|查证日期|来源
+#
+# 铁律：这张表里只许写【查证过】的。凭印象加一家进来，
+# 用户照着配一次配不通，这个功能就废了。
+provider_row() {
+  case "$1" in
+    官方|anthropic|claude)
+      echo "官方|Anthropic 官方|||||" ;;
+    deepseek|深度求索|ds|deepseek-pro)
+      echo "deepseek|DeepSeek V4-Pro|https://api.deepseek.com/anthropic|deepseek-v4-pro|deepseek-v4-flash|2026-08-13|api-docs.deepseek.com" ;;
+    deepseek-flash|ds-flash|flash)
+      echo "deepseek-flash|DeepSeek V4-Flash|https://api.deepseek.com/anthropic|deepseek-v4-flash|deepseek-v4-flash|2026-08-13|api-docs.deepseek.com" ;;
+    *) return 1 ;;
+  esac
+}
+# 表里没有这家（比如用户自己手写的 .env），就把代号原样还回去，
+# 别返回空——空会让一览表里凭空少一行，看起来像"这个人没配"。
+provider_field() {
+  local r; r="$(provider_row "$1")" || { echo "$1"; return 0; }
+  echo "$r" | cut -d'|' -f"$2"
+}
+
+# 同一家的不同型号共用一把钥匙（v4-pro 和 v4-flash 都是 DeepSeek 的）
+provider_family() {
+  case "$1" in
+    deepseek*|ds*|flash|深度求索) echo deepseek ;;
+    *) echo "$1" ;;
+  esac
+}
+provider_keyfile() { echo "$PROVIDER_DIR/$(provider_family "$1").key"; }
+
+# 这个员工现在用谁家的。没有 .env 就是官方。
+role_provider() {
+  local ef; ef="$(role_env "$1")"
+  [ -f "$ef" ] || { echo 官方; return; }
+  local p; p="$(grep -m1 '^LOOP_PROVIDER=' "$ef" 2>/dev/null | cut -d= -f2-)"
+  echo "${p:-自定义}"
+}
+
+# 把某个员工切到某一家。钥匙单独存一份，不重复写进每个人的文件。
+provider_apply() {
+  local role="$1" code="$2"
+  local row; row="$(provider_row "$code")" || return 1
+  local name url big small verified
+  name="$(echo "$row" | cut -d'|' -f2)"
+  url="$(echo "$row"  | cut -d'|' -f3)"
+  big="$(echo "$row"  | cut -d'|' -f4)"
+  small="$(echo "$row"| cut -d'|' -f5)"
+  verified="$(echo "$row" | cut -d'|' -f6)"
+  code="$(echo "$row" | cut -d'|' -f1)"
+
+  # 切回官方 = 把这个人的接口文件删掉，回到默认
+  if [ -z "$url" ]; then rm -f "$(role_env "$role")"; return 0; fi
+
+  local kf; kf="$(provider_keyfile "$code")"
+  [ -f "$kf" ] || return 2          # 还没给钥匙，让上层去要
+
+  mkdir -p "$ROLE_DIR"
+  cat > "$(role_env "$role")" <<EOF
+# 「$role」这个员工用：$name
+# 只影响他一个人。这个文件在调用他的时候被 source 进子 shell，跑完就没了。
+# 接口地址查证日期：$verified
+LOOP_PROVIDER=$code
+. "\$PROVIDER_DIR/$(provider_family "$code").key"
+ANTHROPIC_BASE_URL=$url
+ANTHROPIC_MODEL=$big
+ANTHROPIC_DEFAULT_OPUS_MODEL=$big
+ANTHROPIC_DEFAULT_SONNET_MODEL=$big
+ANTHROPIC_DEFAULT_HAIKU_MODEL=$small
+EOF
+  return 0
+}
+
+# 存钥匙。单独一个文件、只有自己能读，别人的 .env 引用它。
+#
+# 为什么不直接写进每个人的 .env：十个员工就是十份钥匙拷贝，
+# 换钥匙要改十个地方，漏一个就有一个人在用旧的。
+provider_save_key() {
+  local code="$1" key="$2"
+  local fam; fam="$(provider_family "$code")"
+  mkdir -p "$PROVIDER_DIR"
+  local kf="$PROVIDER_DIR/$fam.key"
+  cat > "$kf" <<EOF
+ANTHROPIC_AUTH_TOKEN=$key
+# 官方的 key 如果也在环境里，会跟这把打架，明确清掉
+unset ANTHROPIC_API_KEY
+EOF
+  chmod 600 "$kf" 2>/dev/null || true
+}
+
 # 这个角色要看哪几份文档。
 #
 # 为什么不能全塞：实测问一个只管获客的角色一句话，花了 $2.76、81 秒——
@@ -422,7 +550,14 @@ claude_run() {
   mkdir -p "$dir"
   local ts; ts="$(date +%Y%m%d-%H%M%S)"
   local logf="$dir/$ts-$(basename "$prompt_file" .md).log"
-  LAST_LOG="$logf"   # 出事的时候要回头翻这个日志，见 blocker_reason
+  # 出事的时候要回头翻这个日志，见 blocker_reason。
+  #
+  # 为什么还要多写一个文件：接了别家接口的角色，claude_run 是在【子 shell】里跑的
+  # （因为要 source 他自己的 .env 又不能污染别人）。子 shell 里的赋值出不来，
+  # LAST_LOG 在外面就是空的——于是"没通"能报出来，但"为什么没通"整段是空白。
+  # 落一个文件，外面再捡回去，见 ask_role 结尾。
+  LAST_LOG="$logf"
+  state_set last_log "$logf"
 
   # 花钱之前先过预算闸门
   budget_ok || return 4
@@ -532,17 +667,27 @@ ask_role() {
     { cat "$rf"; printf '\n\n---- 现在问你这件事 ----\n%s\n' "$question"; } > "$tmp"
   fi
 
-  # 这个角色自己的模型（写在角色定义里的「模型：xxx」）
-  local m; m="$(role_model "$role")"
-  [ -n "$m" ] && CLAUDE_EXTRA_ARGS+=(--model "$m")
-
-  # 这个角色自己的环境变量（接别家便宜服务就写这儿），只影响他一个人
+  # 这个角色自己的环境变量（接别家服务就写这儿），只影响他一个人
   local ef; ef="$(role_env "$role")"
+
+  # 这个角色自己的模型（写在角色定义里的「模型：xxx」）。
+  #
+  # 接口文件里指定了模型就以接口为准——角色定义里那行是给官方用的，
+  # 强行传 --model sonnet 给别家接口，等于点了一道人家菜单上没有的菜。
+  local m; m="$(role_model "$role")"
+  if [ -n "$m" ] && ! { [ -f "$ef" ] && grep -q '^ANTHROPIC_MODEL=' "$ef"; }; then
+    CLAUDE_EXTRA_ARGS+=(--model "$m")
+  fi
+
   if [ -f "$ef" ]; then
+    # 在子 shell 里 source，跑完就没了，不污染别人——这是"每人一个接口"的关键。
+    # 代价是子 shell 里的赋值出不来，所以 LAST_LOG 要从文件里捡回来。
     # shellcheck disable=SC1090
     ( set -a; . "$ef"; set +a
       LOG_SUBDIR="roles/$role" claude_run "$tmp" "$@" )
-    return $?
+    local rc=$?
+    LAST_LOG="$(state_get last_log)"
+    return "$rc"
   fi
 
   LOG_SUBDIR="roles/$role" claude_run "$tmp" "$@"

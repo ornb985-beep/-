@@ -7,15 +7,22 @@
 #
 # 它只读，不写任何状态——看板坏了不影响 loop 跑。
 
-import os, re, sys, html, glob, datetime
+import os
+import re
+import sys
+import html
+import glob
+import datetime
 
 ROOT = sys.argv[1] if len(sys.argv) > 1 else "."
 L, D = os.path.join(ROOT, ".loop"), os.path.join(ROOT, "docs")
 
 def rd(p, default=""):
     try:
-        with open(p, encoding="utf-8") as f: return f.read()
-    except Exception: return default
+        with open(p, encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return default
 
 def rdl(p):
     return [x for x in rd(p).splitlines() if x.strip()]
@@ -32,17 +39,28 @@ closed= rd(os.path.join(L,"closed"),"no").strip() == "yes"
 # ---------- 钱 ----------
 cost_rows, spent = [], 0.0
 for i, line in enumerate(rdl(os.path.join(L,"cost.tsv"))):
-    if i == 0: continue
+    if i == 0:
+        continue
     p = line.split("\t")
     if len(p) >= 4:
-        try: c = float(p[2])
-        except ValueError: continue
+        try:
+            c = float(p[2])
+        except ValueError:
+            continue
         spent += c
-        cost_rows.append((p[0], p[1], c, p[3]))
+        # 第5列是「这笔走的谁家接口」。老的账单没有这一列，当官方处理。
+        cost_rows.append((p[0], p[1], c, p[3], p[4] if len(p) >= 5 else "官方"))
 by_who = {}
-for _, who, c, _s in cost_rows:
+for _, who, c, _s, _pv in cost_rows:
     by_who[who] = by_who.get(who, 0) + c
 top_cost = sorted(by_who.items(), key=lambda x: -x[1])[:8]
+
+# 走了别家接口的，这里的美元数不作数——claude 是按 Anthropic 价目表算的，
+# 它不知道别家收多少钱。不标出来，看板上就是一笔很正经的假账。
+off_providers = {}
+for _t, _w, _c, _s, pv in cost_rows:
+    if pv and pv != "官方":
+        off_providers[pv] = off_providers.get(pv, 0) + 1
 
 # ---------- 人 ----------
 def roles_in(d):
@@ -55,7 +73,15 @@ def roles_in(d):
         typ   = (re.search(r"^类型：(.+)$", t, re.M) or [None,""])[1].strip() if re.search(r"^类型：", t, re.M) else ""
         model = (re.search(r"^模型：(.+)$", t, re.M) or [None,""])[1].strip() if re.search(r"^模型：", t, re.M) else ""
         logs  = len(glob.glob(os.path.join(L,"log","roles",n,"*.log")))
-        out.append(dict(name=n, layer=layer, one=one, typ=typ, model=model, logs=logs))
+        # 这个人用谁家的 AI。有 .env 就是换过接口的，没有就是官方。
+        # 组织图上必须能一眼看出来——"我以为客服在用便宜的"
+        # 和"客服真的在用便宜的"，是两回事。
+        env = rd(f[:-3] + ".env")
+        pv = (re.search(r"^LOOP_PROVIDER=(.+)$", env, re.M) or [None,""])[1].strip() if env else ""
+        if env and not pv:
+            pv = "自定义"
+        out.append(dict(name=n, layer=layer, one=one, typ=typ,
+                        model=model, logs=logs, provider=pv))
     return out
 
 on   = roles_in(os.path.join(L,"roles"))
@@ -81,9 +107,11 @@ chat = chat[-40:]
 # ---------- 台账 ----------
 tasks = []
 for i, line in enumerate(rdl(os.path.join(L,"tasks.tsv"))):
-    if i == 0: continue
+    if i == 0:
+        continue
     p = line.split("\t")
-    if len(p) >= 6: tasks.append(p)
+    if len(p) >= 6:
+        tasks.append(p)
 
 # ---------- 项目任务清单 ----------
 tl = rd(os.path.join(D,"07-任务清单.md"))
@@ -105,8 +133,9 @@ def pct(a,b): return 0 if not b else round(a*100/b)
 def person(r, extra=""):
     tag = f'<span class="t">{e(r["typ"])}</span>' if r["typ"] else ""
     mdl = f'<span class="m">{e(r["model"])}</span>' if r["model"] else ""
+    pv  = f'<span class="pv">{e(r.get("provider",""))}</span>' if r.get("provider") else ""
     n = f'<span class="n">{r["logs"]}</span>' if r["logs"] else ""
-    return (f'<div class="p {extra}"><div class="ph"><b>{e(r["name"])}</b>{tag}{mdl}{n}</div>'
+    return (f'<div class="p {extra}"><div class="ph"><b>{e(r["name"])}</b>{tag}{mdl}{pv}{n}</div>'
             f'<div class="po">{e(r["one"])}</div></div>')
 
 stage_i = [s for s,_ in STAGES].index(stage) if stage in [s for s,_ in STAGES] else 0
@@ -131,6 +160,14 @@ cost_html = "".join(
     f'<tr><td>{e(w)}</td><td class="num">${c:.2f}</td>'
     f'<td class="bar"><i style="width:{pct(c, top_cost[0][1])}%"></i></td></tr>'
     for w,c in top_cost) or '<tr><td colspan="3" class="empty">还没花钱</td></tr>'
+
+if off_providers:
+    which = "、".join(f"{k}（{v} 次）" for k, v in off_providers.items())
+    cost_html += (
+        '<tr><td colspan="3" class="warnrow">'
+        f'这里面有一部分<b>不作数</b>：{e(which)}走的不是官方接口，'
+        '美元数是按官方价目表折算的，不是你真付的钱。真实花费去那家后台看。'
+        '</td></tr>')
 
 bud = f'{spent:.2f} / {budget}' if budget else f'{spent:.2f}（没设上限）'
 bud_pct = pct(spent, float(budget)) if budget else 0
@@ -169,9 +206,11 @@ h1{{font-size:22px;margin:0 0 4px}} h1 small{{color:var(--ink3);font-weight:400;
 .p.arc{{opacity:.45}}
 .ph{{display:flex;align-items:center;gap:6px;flex-wrap:wrap}} .ph b{{font-size:13.5px}}
 .po{{font-size:11.5px;color:var(--ink3);margin-top:1px;line-height:1.45}}
-.t,.m,.n{{font-size:10px;padding:1px 5px;border-radius:3px}}
+.t,.m,.n,.pv{{font-size:10px;padding:1px 5px;border-radius:3px}}
 .t{{background:#1d3547;color:var(--blue)}} .m{{background:#2a2340;color:var(--purple)}}
+.pv{{background:#173a2c;color:var(--ok);font-weight:600}}
 .n{{background:var(--line);color:var(--ink3);margin-left:auto}}
+.warnrow{{font-size:11.5px;color:var(--warn);line-height:1.6;padding-top:9px}}
 .pool{{font-size:12px;color:var(--ink3);line-height:1.9}}
 .pool code{{background:var(--card2);padding:1px 5px;border-radius:3px;color:var(--ink2)}}
 .msg{{border-bottom:1px solid var(--line);padding:11px 0}} .msg:last-child{{border:0}}
@@ -238,5 +277,6 @@ td{{padding:6px 5px;border-bottom:1px solid var(--line);vertical-align:top}}
 </div></body></html>"""
 
 out = os.path.join(ROOT, "看板.html")
-with open(out, "w", encoding="utf-8") as f: f.write(HTML)
+with open(out, "w", encoding="utf-8") as f:
+    f.write(HTML)
 print(out)

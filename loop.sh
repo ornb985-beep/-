@@ -1179,11 +1179,218 @@ cmd_cost() {
   | sort -rn \
   | awk -F'\t' '{ printf "  %-22s %8.2f %6d %10.2f\n", $2, $1, $3, $1/$3 }'
 
+  # 走了别家接口的，这里的美元数是假的，必须当场说破。
+  #
+  # claude 报的 total_cost_usd 是按【Anthropic 价目表】算的。
+  # 走 DeepSeek 时它照报一个数，但它不知道 DeepSeek 收多少钱。
+  # 不标出来，账面上就是一笔看起来很正经的假账——那正是这套东西第2条不许干的事。
+  local other; other="$(awk -F'\t' 'NR>1 && $5!="" && $5!="官方" { c[$5]++ } END { for (k in c) printf "%s(%d次) ", k, c[k] }' "$COST_LOG")"
+  if [ -n "$other" ]; then
+    say ""
+    warn "上面有一部分不作数：$other"
+    say  "  ${C_DIM}这些走的不是官方接口，美元数是按官方价目表折算的，不是你真付的钱。"
+    say  "  真实花费去那家自己的后台看。哪几笔走的谁家，看 接口 那一列。${C_OFF}"
+  fi
+
   say ""
   # 跟目标预算对一下——光看花了多少没用，要看占预算多少
   local budget; budget="$(grep -oE '¥?[0-9]+ *元?/ *月|每月[^0-9]*[0-9]+' "$DOC_DIR/00-目标.md" 2>/dev/null | head -1)"
   [ -n "$budget" ] && say "${C_DIM}你在 00-目标.md 里写的预算：$budget${C_OFF}"
   say "${C_DIM}明细：${COST_LOG#"$ROOT/"}${C_OFF}"
+}
+
+# ---------- 接口：给每个员工换脑子 ----------
+#
+# 这条命令回答一个问题：这个员工，用谁家的 AI？
+#
+# 判断力省不得，体力活可以省。CEO 裁决、风控反证用最强的；
+# 客服分拣、竞品巡查、内容初稿用便宜的——**便宜的差价是几十倍，不是几倍。**
+provider_list_known() {
+  say ""
+  printf '  %s%s%s\n' "$(pad 代号 18)" "$(pad 是什么 26)" "查证日期"
+  local c
+  for c in 官方 deepseek deepseek-flash; do
+    local row; row="$(provider_row "$c")"
+    printf '  %s%s%s\n' \
+      "$(pad "$(echo "$row" | cut -d'|' -f1)" 18)" \
+      "$(pad "$(echo "$row" | cut -d'|' -f2)" 26)" \
+      "$(echo "$row" | cut -d'|' -f6)"
+  done
+}
+
+# 要钥匙。三个来源：命令行给的 → 环境变量里的 → 当场问。
+provider_need_key() {
+  local code="$1" given="${2:-}"
+  local fam; fam="$(provider_family "$code")"
+  [ -f "$(provider_keyfile "$code")" ] && [ -z "$given" ] && return 0
+
+  local key="$given"
+  if [ -z "$key" ]; then
+    case "$fam" in
+      deepseek) key="${DEEPSEEK_API_KEY:-}" ;;
+    esac
+  fi
+  if [ -z "$key" ] && [ -t 0 ]; then
+    say ""
+    say "要一把 ${C_BOLD}$fam${C_OFF} 的钥匙（API Key）。"
+    say "${C_DIM}去 platform.deepseek.com 后台自己建一把，形如 sk-xxxx。${C_OFF}"
+    printf '  贴在这儿（打字不显示，贴完回车）：'
+    read -r -s key; printf '\n'
+  fi
+  if [ -z "$key" ]; then
+    warn "没拿到钥匙，没法切。"
+    say  "两种给法："
+    say  "  ${C_BOLD}./loop.sh 接口 <员工> $code sk-你的key${C_OFF}"
+    say  "  ${C_BOLD}export DEEPSEEK_API_KEY=sk-你的key${C_OFF} 之后再跑一次"
+    return 1
+  fi
+  provider_save_key "$code" "$key"
+  ok "钥匙存好了：${C_DIM}$(provider_keyfile "$code" | sed "s|$ROOT/||")${C_OFF}（只有你能读，也不会进版本库）"
+  return 0
+}
+
+cmd_provider() {
+  local a1="${1:-}" a2="${2:-}" a3="${3:-}"
+
+  # 不带参数：一览表
+  if [ -z "$a1" ]; then
+    local rs; rs="$(roles_list)"
+    title "每个员工用谁家的脑子"
+    if [ -z "$rs" ]; then
+      warn "还一个员工都没招。先 ${C_BOLD}./loop.sh hire 客服 竞品${C_OFF}"
+    else
+      say ""
+      printf '  %s%s%s%s\n' "$(pad 员工 14)" "$(pad 层 8)" "$(pad 用谁家的 22)" "钥匙"
+      rule
+      local r
+      while IFS= read -r r; do
+        [ -z "$r" ] && continue
+        local p; p="$(role_provider "$r")"
+        local nm="官方" col="$C_DIM" ky=""
+        if [ "$p" != "官方" ]; then
+          nm="$(provider_field "$p" 2)"; col="$C_GREEN"
+          if [ -f "$(provider_keyfile "$p")" ]; then ky="有"
+          else ky="${C_RED}丢了 → ./loop.sh 接口 $r $p sk-你的key${C_OFF}"; fi
+        fi
+        printf '  %s%s%s%s%s %s\n' \
+          "$(pad "$r" 14)" "$(pad "$(role_layer "$r")" 8)" \
+          "$col" "$(pad "$nm" 22)" "$C_OFF" "$ky"
+      done <<< "$rs"
+    fi
+    provider_list_known
+    say ""
+    say "换一个人：      ${C_BOLD}./loop.sh 接口 客服 deepseek${C_OFF}"
+    say "换一整层：      ${C_BOLD}./loop.sh 接口 执行层 deepseek${C_OFF}"
+    say "换回官方：      ${C_BOLD}./loop.sh 接口 客服 官方${C_OFF}"
+    say "先验一下通不通：${C_BOLD}./loop.sh 接口 测 客服${C_OFF}"
+    say ""
+    say "${C_DIM}判断力省不得，体力活可以省——CEO/风控/战略留官方，客服/竞品/内容切便宜的。${C_OFF}"
+    return 0
+  fi
+
+  # 测：真打一次，看通不通、多久、多少钱
+  if [ "$a1" = "测" ] || [ "$a1" = "test" ]; then
+    local role="$a2"
+    [ -z "$role" ] && die "要说测谁：./loop.sh 接口 测 客服"
+    [ -f "$(role_file "$role")" ] || die "没有「$role」这个员工（./loop.sh roles 看都有谁）"
+    local p; p="$(role_provider "$role")"
+    title "测「$role」的接口：$(provider_field "$p" 2 2>/dev/null || echo "$p")"
+    say "${C_DIM}问他一句最短的话，只看通不通。${C_OFF}"
+    rule
+    local t0; t0="$(date +%s)"
+    local rc=0
+    NO_GROUP_CHAT=1 ROLE_ISOLATED=1 \
+      ask_role "$role" "只回四个字：接口通了。别的什么都不要说。" >/dev/null 2>&1 || rc=$?
+    local t1; t1="$(date +%s)"
+    rule
+    if [ "$rc" -ne 0 ]; then
+      warn "没通。"
+      say ""
+      say "它自己的原话："
+      say "${C_DIM}$(tail -6 "$LAST_LOG" 2>/dev/null || tail -6 "$LAST_LOG.err" 2>/dev/null)${C_OFF}"
+      say ""
+      say "最常见的三个原因："
+      say "  1. 钥匙不对或者过期了 → ${C_BOLD}./loop.sh 接口 $role $p sk-新的key${C_OFF}"
+      say "  2. 那家接口地址变了 → 去他家文档确认一下，改 $(role_env "$role" | sed "s|$ROOT/||")"
+      say "  3. 余额不够了 → 去他家后台看"
+      say ""
+      say "先切回官方把活干完：${C_BOLD}./loop.sh 接口 $role 官方${C_OFF}"
+      return 1
+    fi
+    ok "通了，用了 $((t1-t0)) 秒。"
+    say "  它回的：${C_DIM}$(tail -3 "$LAST_LOG" 2>/dev/null | tr -d '\n')${C_OFF}"
+    if [ "$p" != "官方" ]; then
+      say ""
+      warn "钱这一项要说清楚：账单里这几笔的美元数【不作数】。"
+      say  "  那个数是 claude 按 Anthropic 的价目表算的，它不知道 $p 收多少钱。"
+      say  "  ${C_BOLD}真实花费去 $p 自己的后台看。${C_OFF}台账里已经标了是谁家的。"
+    fi
+    return 0
+  fi
+
+  # 换：./loop.sh 接口 <员工|层> <代号> [key]
+  local who="$a1" code="$a2" key="$a3"
+  [ -z "$code" ] && die "要说换成谁家的：./loop.sh 接口 $who deepseek（跑 ./loop.sh 接口 看有哪几家）"
+  provider_row "$code" >/dev/null 2>&1 || {
+    warn "不认识「$code」这家。"
+    say "${C_DIM}这张表里只放查证过的——凭印象加一家进来，你照着配一次配不通，这功能就废了。${C_OFF}"
+    provider_list_known
+    say ""
+    say "要接表上没有的，自己写 ${C_BOLD}.loop/roles/<员工>.env${C_OFF}，"
+    say "格式看 ${C_BOLD}安装与落地.md${C_OFF} 第三节。"
+    return 1
+  }
+
+  # 谁：一个人 / 一整层 / 全部
+  local -a targets=()
+  case "$who" in
+    全部|all)
+      while IFS= read -r r; do [ -n "$r" ] && targets+=("$r"); done <<< "$(roles_list)" ;;
+    执行层|执行|右分支)
+      while IFS= read -r r; do
+        [ -n "$r" ] && [ "$(role_layer "$r")" = "执行" ] && targets+=("$r")
+      done <<< "$(roles_list)" ;;
+    参谋层|参谋|左分支)
+      while IFS= read -r r; do
+        [ -n "$r" ] && [ "$(role_layer "$r")" = "参谋" ] && targets+=("$r")
+      done <<< "$(roles_list)" ;;
+    *)
+      [ -f "$(role_file "$who")" ] || die "没有「$who」这个员工（./loop.sh roles 看都有谁）"
+      targets=("$who") ;;
+  esac
+  [ "${#targets[@]}" -eq 0 ] && die "「$who」这一层现在一个人都没有。先 ./loop.sh hire"
+
+  # 切回官方不用钥匙；切别家要
+  local url; url="$(provider_field "$code" 3)"
+  if [ -n "$url" ]; then
+    provider_need_key "$code" "$key" || return 1
+  fi
+
+  title "换脑子"
+  local r n=0
+  for r in "${targets[@]}"; do
+    local before; before="$(role_provider "$r")"
+    if provider_apply "$r" "$code"; then
+      local after; after="$(role_provider "$r")"
+      printf '  %s%s → %s%s%s\n' "$(pad "$r" 14)" "$before" "$C_GREEN" "$after" "$C_OFF"
+      n=$((n+1))
+    else
+      warn "  $r 没换成"
+    fi
+  done
+  say ""
+  ok "换了 $n 个人。${C_DIM}其他人一点没动。${C_OFF}"
+
+  if [ -n "$url" ]; then
+    say ""
+    say "${C_BOLD}下一步：先验一个，别一次全信。${C_OFF}"
+    say "  ${C_BOLD}./loop.sh 接口 测 ${targets[0]}${C_OFF}"
+    say ""
+    warn "还有一件事必须先说清楚：${C_BOLD}账单会不准。${C_OFF}"
+    say  "  ${C_DIM}claude 只会按 Anthropic 的价目表算钱，它不知道别家收多少。"
+    say  "  台账第5列标了每一笔走的谁家，真实花费去那家后台看。${C_OFF}"
+  fi
+  return 0
 }
 
 # 看看现在都有哪些角色，各自聊过几次
@@ -1370,6 +1577,9 @@ cmd_help() {
   ./loop.sh 台账                 谁手上有什么活、干完没有、验收没有
   ./loop.sh say "话"             在群里说一句，所有角色下次开口前都会看到
   ./loop.sh cost                 花了多少钱、哪一步最贵
+  ./loop.sh 接口                 每个员工用谁家的 AI（可以一人一家，互不影响）
+  ./loop.sh 接口 客服 deepseek    把某个员工换成 DeepSeek；换整层写「执行层」
+  ./loop.sh 接口 测 客服          真打一次，验证这个员工的接口通不通
   ./loop.sh roles                看看现在有哪些角色，各自聊过几次
   ./loop.sh ask <角色> "问题"     单独问某个人。每个人有自己的对话线程，接着上次聊
   ./loop.sh explain              用大白话讲一遍现在什么情况
@@ -1422,7 +1632,8 @@ main() {
     roster|排班) cmd_roster ;;
     assign|派活) cmd_assign "${1:-}" "${2:-}" ;;
     review|验收) cmd_review ;;
-    board|台账) cmd_board ;;
+    ledger|台账) cmd_board ;;
+    provider|接口|换脑子) cmd_provider "${1:-}" "${2:-}" "${3:-}" ;;
     auto|自动) cmd_auto ;;
     budget|预算) cmd_budget "${1:-}" ;;
     close|结项) cmd_close ;;
