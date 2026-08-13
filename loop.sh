@@ -455,6 +455,28 @@ _run_director() {
 cmd_dispatch() { _run_director "派单 · 把 CEO 的决策拆成每个人的活" 派单 "11-派工单.md"; }
 cmd_roster()   { _run_director "排班 · 今天每个人做什么" 排班 "12-排班.md"; }
 
+# 看板：从真实状态生成一个本地 HTML，双击就开。
+#
+# 为什么是本地 HTML 不是网页服务：这套东西是你机器上的一个脚本，没有常驻服务。
+# 生成一个自包含的 .html，零依赖、断网能用、不会挂。想刷新就再跑一次。
+# 它只读状态、不写任何东西——看板坏了不影响 loop 跑。
+cmd_board_html() {
+  command -v python3 >/dev/null 2>&1 || {
+    warn "看板要用 python3 生成，这台机器上没有。"
+    say  "不影响跑 loop，只是没有可视化。装个 python3 就有了。"
+    return 1
+  }
+  local out; out="$(python3 "$ROOT/scripts/看板.py" "$ROOT")" || {
+    warn "看板没生成成功。"; return 1; }
+  ok "看板好了：${C_BOLD}${out#"$ROOT/"}${C_OFF}"
+  say "${C_DIM}双击打开就行。想刷新再跑一次 ./loop.sh 看板${C_OFF}"
+  # 能自动打开就自动打开
+  if   command -v open    >/dev/null 2>&1; then open "$out" 2>/dev/null || true
+  elif command -v xdg-open>/dev/null 2>&1; then xdg-open "$out" 2>/dev/null || true
+  elif command -v explorer.exe >/dev/null 2>&1; then explorer.exe "$(basename "$out")" 2>/dev/null || true
+  fi
+}
+
 # CEO 设计专家团：先想清楚这个项目缺哪几块判断，再照缺口去找人。
 #
 # 为什么这一步必须有：行业专家擅长查，但他不知道这个项目缺什么。
@@ -1328,7 +1350,8 @@ cmd_help() {
 
   ./loop.sh start "你想做什么"   开始（一句话说清就行，不用想得多完整）
   ./loop.sh go                   继续往下跑
-  ./loop.sh status               看进度
+  ./loop.sh status               看进度（终端）
+  ./loop.sh 看板                 生成桌面看板：组织图＋群聊＋台账＋账单，双击就开
   ./loop.sh today                每天用：今天做哪 3 件事，顺便看这周到底动了没有
   ./loop.sh ceo                  内置操盘手：看数、拍板、组队、问一句还到不到得了目标
   ./loop.sh budget 50            设花钱上限（美元）。不设就不给跑自动
@@ -1388,6 +1411,7 @@ main() {
     status|st) cmd_status ;;
     ceo|操盘) cmd_ceo ;;
     industry|行业报告) cmd_industry "${1:-}" ;;
+    board|看板) cmd_board_html ;;
     design|专家团) cmd_panel_design ;;
     distill|蒸馏) cmd_distill ;;
     panel|专家群) cmd_expert_panel "${1:-}" ;;
