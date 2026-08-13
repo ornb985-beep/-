@@ -156,6 +156,12 @@ if [ -f scripts/test-论证.sh ]; then
   run "论证（十个专家 ＋ 角色真收到了提示词）" bash scripts/test-论证.sh
 fi
 
+# 蓝图的收敛循环。最要紧的一条：它不许自己说"定了"——
+# 拍板必须是用户亲口说的。它替你拍板，等于这整个循环白做。
+if [ -f scripts/test-蓝图.sh ]; then
+  run "蓝图收敛循环（改到你说就是它了）" bash scripts/test-蓝图.sh
+fi
+
 # ---------------- 项目自定义检查 ----------------
 if [ -f check.local.sh ]; then
   run "项目自定义检查" bash check.local.sh

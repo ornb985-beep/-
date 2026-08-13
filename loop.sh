@@ -1529,6 +1529,168 @@ cmd_provider() {
   return 0
 }
 
+# ---------- 蓝图：一直改到他说「对，这就是我要做的」 ----------
+#
+# 这是个【收敛循环】，跟第1步「听懂」用的是同一套机制（round_* 那几个）：
+#   它自己在文档里写「状态：还在改 / 就是它了」
+#   还在改 → 停下来问你一个问题，不往下走
+#   一次只问一个，同一轮的问题在本地走完，全答完了才回去重跑一轮
+#
+# 「就是它了」这四个字只有它听到你亲口说了那句话才准写。
+# 你说"挺好的""行吧"不算——那是客气，不是拍板。
+BLUEPRINT_FILE="$DOC_DIR/00-蓝图.md"
+BP_PROGRESS="$STATE_DIR/蓝图答题进度"
+BP_MAX_ROUNDS="${BP_MAX_ROUNDS:-12}"
+BP_QA='^##[[:space:]]*我想确认一件事'
+BP_QB='^##[[:space:]]*详细版'
+
+bp_state()    { round_state "$BLUEPRINT_FILE" 就是它了; }
+bp_round()    { round_num "$BLUEPRINT_FILE"; }
+bp_q_count()  { round_q_count "$BLUEPRINT_FILE" "$BP_QA" "$BP_QB"; }
+bp_q_nth()    { round_q_nth "$BLUEPRINT_FILE" "$BP_QA" "$BP_QB" "$1"; }
+bp_answered() { round_answered "$BP_PROGRESS" "$(bp_round)"; }
+
+# 老板自己的知识库/审美文档。有就喂进去，没有就跳过。
+# 这是预留的口子：以后他往 references/我的知识库/ 里丢什么，蓝图就会读什么。
+kb_files() {
+  local d="$ROOT/references/我的知识库"
+  [ -d "$d" ] || return 0
+  find "$d" -maxdepth 2 -type f \( -name '*.md' -o -name '*.txt' \) 2>/dev/null | sort
+}
+
+cmd_blueprint() {
+  [ -f "$LISTEN_FILE" ] || die "先跑第1步：./loop.sh start \"你想说的\""
+
+  local round; round="$(bp_round)"
+  if [ "$round" -ge "$BP_MAX_ROUNDS" ] && [ "$(bp_state)" != "到了" ]; then
+    rule
+    warn "改了 $round 轮还没定下来。"
+    say  "${C_DIM}这通常不是蓝图的问题，是方向本身还没定。回头看看 docs/00-镜子.md，"
+    say  "或者 ./loop.sh 照镜子 —— 有时候改不完，是因为要做的根本不是这个。${C_OFF}"
+    rule
+    return 2
+  fi
+
+  title "产品蓝图 · 第 $((round + 1)) 轮"
+  say "${C_DIM}一直改到你说「对，这就是我要做的」为止。${C_OFF}"
+  rule
+
+  local ctx=("$LISTEN_FILE")
+  local f
+  for f in "$DOC_DIR/00-目标.md" "$DOC_DIR/00-论证.md" "$DOC_DIR/00-镜子.md" \
+           "$DOC_DIR/03-什么算好.md" "$BLUEPRINT_FILE"; do
+    [ -f "$f" ] && ctx+=("$f")
+  done
+  local kb; kb="$(kb_files)"
+  if [ -n "$kb" ]; then
+    while IFS= read -r f; do [ -n "$f" ] && ctx+=("$f"); done <<< "$kb"
+    say "${C_DIM}读上了你自己的知识库（$(printf '%s\n' "$kb" | wc -l) 份）${C_OFF}"
+  fi
+
+  local rc=0
+  claude_run "$CMD_DIR/蓝图.md" "${ctx[@]}" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  if [ "$rc" -ne 0 ]; then report_failure "$rc" "画蓝图的时候出错了"; return $?; fi
+  [ -f "$BLUEPRINT_FILE" ] || { rule; warn "没产出 $(basename "$BLUEPRINT_FILE")，按没做成处理。"; return 1; }
+
+  bp_gate
+  [ "$(bp_state)" = "到了" ] && return 0 || return 2
+}
+
+bp_gate() {
+  rule
+  if [ "$(bp_state)" = "到了" ]; then
+    title "定了 🎉"
+    say "你说了「就是它了」，蓝图锁定。"
+    say ""
+    say "完整的在 ${C_BOLD}${BLUEPRINT_FILE#"$ROOT/"}${C_OFF}"
+    say "${C_DIM}想看细节：那份文档里「详细版」那一节——用户流程、技术路线、时间表、第一周每天做什么${C_OFF}"
+    say ""
+    say "接着往下：${C_BOLD}./loop.sh go${C_OFF}"
+    rule
+    return 0
+  fi
+
+  local total done_n idx
+  total="$(bp_q_count)"; done_n="$(bp_answered)"; idx=$((done_n + 1))
+  if [ "$total" -eq 0 ]; then
+    title "这一版画好了"
+    say "看看：${C_BOLD}${BLUEPRINT_FILE#"$ROOT/"}${C_OFF}"
+    say ""
+    say "${C_BOLD}对了就说一句：./loop.sh 定了${C_OFF}"
+    say "${C_DIM}要改就说哪儿不对：./loop.sh 改 \"这个方向不对，我其实想…\"${C_OFF}"
+    rule
+    return 0
+  fi
+
+  title "这一版画好了，有一件事想跟你确认"
+  [ "$total" -gt 1 ] && say "${C_DIM}第 $idx 个，共 $total 个。答完这个再给下一个。${C_OFF}"
+  say ""
+  printf '%s\n' "$(bp_q_nth "$idx")"
+  rule
+  say "回答：${C_BOLD}./loop.sh 改 \"A\"${C_OFF}　${C_DIM}或者直接说哪儿不对${C_OFF}"
+  say "${C_BOLD}已经对了就说：./loop.sh 定了${C_OFF}"
+  say ""
+  say "${C_DIM}完整蓝图（含详细版）：${BLUEPRINT_FILE#"$ROOT/"}${C_OFF}"
+  rule
+}
+
+# 回答蓝图的问题 / 说哪儿要改
+cmd_blueprint_answer() {
+  local text="${1:-}"
+  [ -n "$text" ] || die '用法：./loop.sh 改 "A" 或 ./loop.sh 改 "这个方向不对，我其实想…"'
+  [ -f "$BLUEPRINT_FILE" ] || die "还没有蓝图。先跑 ./loop.sh 蓝图"
+
+  local round total done_n idx
+  round="$(bp_round)"; total="$(bp_q_count)"
+  done_n="$(bp_answered)"; idx=$((done_n + 1))
+
+  {
+    if [ "$total" -gt 0 ] && [ "$idx" -le "$total" ]; then
+      printf '\n## 你的回答 · 第 %s 轮 · 问题 %s\n\n' "$round" "$idx"
+    else
+      printf '\n## 你说要改的（第 %s 轮）\n\n' "$round"
+    fi
+    printf '%s\n' "$text"
+  } >> "$BLUEPRINT_FILE"
+  round_answered_set "$BP_PROGRESS" "$round" "$idx"
+  ok "记下了。"
+
+  # 同一轮还有没答的，本地接着问，不重跑 AI（重跑一次就是多花一次钱）
+  if [ "$total" -gt 0 ] && [ "$idx" -lt "$total" ]; then
+    rule
+    title "下一个 —— 第 $((idx+1)) 个，共 $total 个"
+    say ""
+    printf '%s\n' "$(bp_q_nth "$((idx+1))")"
+    rule
+    say "回答：${C_BOLD}./loop.sh 改 \"A\"${C_OFF}　${C_BOLD}已经对了：./loop.sh 定了${C_OFF}"
+    rule
+    return 0
+  fi
+
+  say "${C_DIM}照你说的重画一版。${C_OFF}"
+  rule
+  cmd_blueprint
+}
+
+# 「对，这就是我要做的」——只有你亲口说，才算数
+cmd_blueprint_lock() {
+  [ -f "$BLUEPRINT_FILE" ] || die "还没有蓝图。先跑 ./loop.sh 蓝图"
+  {
+    printf '\n## 你拍板了（%s）\n\n' "$(date '+%Y-%m-%d %H:%M')"
+    printf '对，这就是我要做的。\n'
+  } >> "$BLUEPRINT_FILE"
+  # 状态行是它自己写的，这里只补一句机器读得到的，免得它下一轮又当没定
+  printf '\n状态：就是它了\n' >> "$BLUEPRINT_FILE"
+  rule
+  title "定了 🎉"
+  say "蓝图锁在 ${C_BOLD}${BLUEPRINT_FILE#"$ROOT/"}${C_OFF}"
+  say ""
+  say "${C_DIM}想看细节：那份文档里「详细版」那一节${C_OFF}"
+  say "接着往下：${C_BOLD}./loop.sh go${C_OFF}"
+  rule
+}
+
 # ---------- 照镜子：在动手之前，先看清他到底想要什么 ----------
 #
 # 为什么要有这一步：大多数项目不是死于做得不好，
@@ -1937,6 +2099,9 @@ cmd_help() {
   ./loop.sh 蒸馏                 把报告里的真专家做成能单独提问的智能体
   ./loop.sh 专家群 "议题"        让蒸馏出来的专家依次发言，后面的能反驳前面的
   ./loop.sh 封存 <名字>          用完收起来（不删，随时 ./loop.sh 起复）
+  ./loop.sh 蓝图                 画产品蓝图：形态/功能/技术/时间表，一直改到你说「就是它了」
+  ./loop.sh 改 "A"               回答蓝图的问题，或者说哪儿不对
+  ./loop.sh 定了                 对，这就是我要做的（蓝图锁定）
   ./loop.sh 照镜子               动手之前，先看清你到底想要什么（只用你自己的话当镜子）
   ./loop.sh 论证                 十个专家把「这事到底成不成」查一遍，给可行性判定
   ./loop.sh 会诊 "议题"          CEO 判断该问谁 → 逐个咨询 → 综合裁决
@@ -2006,6 +2171,9 @@ main() {
     assign|派活) cmd_assign "${1:-}" "${2:-}" ;;
     review|验收) cmd_review ;;
     ledger|台账) cmd_board ;;
+    blueprint|蓝图) cmd_blueprint ;;
+    revise|改) cmd_blueprint_answer "${1:-}" ;;
+    lock|定了) cmd_blueprint_lock ;;
     mirror|照镜子) cmd_mirror ;;
     argue|论证) cmd_argue ;;
     provider|接口|换脑子) cmd_provider "${1:-}" "${2:-}" "${3:-}" ;;

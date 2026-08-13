@@ -126,79 +126,67 @@ stage_doc() {
 # 还没听懂 → 停下来等你回答，不往下走
 # 听懂了   → 才轮到你点头确认，然后进第2步
 #
-# 注意冒号要写成 (:|：) 这种并列，不能写成 [:：]——
-# 全角冒号是 3 个字节，方括号会把它拆成 3 个单字节，匹配就废了。
-# 这个坑这个项目已经栽过一次（角色的「上下文：」那行）。
 LISTEN_FILE="$DOC_DIR/00-听到的.md"
 LISTEN_MAX_ROUNDS="${LISTEN_MAX_ROUNDS:-3}"
 
-# 注意这两个都【不锚定行首】。
-# 模板里那一行长这样：「轮次：第 2 轮   状态：还没听懂」——
-# 两个字段在同一行上，用 ^状态 去匹配永远匹配不到。
-# （这条是测试逮出来的：文档明明写着"听懂了"，机器却一直当成"还没听懂"。）
+# ---------- 收敛循环（通用）----------
 #
-# 「状态：还没听懂」不会被误判成听懂了——冒号后面紧跟的是"还"不是"听"。
-listen_state() {
-  [ -f "$LISTEN_FILE" ] || { echo 没开始; return; }
-  if grep -qE '状态(:|：)[[:space:]]*听懂了' "$LISTEN_FILE" 2>/dev/null; then
-    echo 听懂了
-  else
-    echo 还没听懂
-  fi
+# 「一直改到你说这就是我要的」这件事，第1步（听懂）和产品蓝图是同一个机制：
+#   文档里有一行机器读的状态 → 没到就停下问你 → 一次只问一个 →
+#   全答完了才回去重跑一轮 → 它自己写"到了"，才算收敛。
+#
+# 所以抽成通用的，两处共用一套。下面的 listen_* 是它的一层薄壳。
+# 抽出来的另一个好处：这套机制只需要测一次。
+round_state() {           # round_state <文件> <到了的标志词>
+  local f="$1" mark="$2"
+  [ -f "$f" ] || { echo 没开始; return; }
+  if grep -qE "状态(:|：)[[:space:]]*$mark" "$f" 2>/dev/null; then echo 到了; else echo 还没到; fi
 }
-
-listen_round() {
+round_num() {             # 轮次：第 N 轮
   local n
-  n="$(grep -m1 -oE '轮次(:|：)[[:space:]]*第[[:space:]]*[0-9]+' "$LISTEN_FILE" 2>/dev/null \
+  n="$(grep -m1 -oE '轮次(:|：)[[:space:]]*第[[:space:]]*[0-9]+' "$1" 2>/dev/null \
        | grep -oE '[0-9]+' || true)"
   echo "${n:-0}"
 }
-
-# 把「## 四、我不许替你猜的」那一节原样打出来。
-# 为什么要单独摘出来：问题在文档中间，不摘的话人得自己去翻文件找。
-listen_questions() {
-  [ -f "$LISTEN_FILE" ] || return 0
-  awk '/^##[[:space:]]*四、/ { on=1 } on && /^##[[:space:]]*五、/ { exit } on { print }' \
-    "$LISTEN_FILE" 2>/dev/null
+round_qsection() {        # 把提问那一节摘出来（从 <起始标题> 到 <结束标题>）
+  [ -f "$1" ] || return 0
+  awk -v a="$2" -v b="$3" '$0 ~ a { on=1 } on && $0 ~ b { exit } on { print }' "$1" 2>/dev/null
 }
-
-# ---------- 一次只问一个 ----------
-#
-# 这一条是产品定义，不是界面细节：
-# **用户的全部工作量 = 回答一个问题，或者做一个选择题。**
-#
-# 一次甩三个问题给他，那不是"回答一个问题"，那是一张表格——
-# 表格会让人想"我得先都想清楚再答"，于是他就不答了。
-#
-# 而且顺序本身有信息：第一题答完，第二题可能就不用问了。
-# 所以这里【一次只显示一个】，答完再给下一个。
-#
-# 但不是每答一个就重跑一轮 AI——那样三个问题要花三次钱。
-# 同一轮里的问题在本地一个个走完，全答完了才回去让它重新听一遍。
-listen_q_count() {
-  listen_questions | grep -cE '^###[[:space:]]*问题' 2>/dev/null || echo 0
-}
-
-listen_q_nth() {
-  listen_questions | awk -v want="$1" '
+round_q_count() { round_qsection "$@" | grep -cE '^###[[:space:]]*问题' 2>/dev/null || echo 0; }
+round_q_nth() {           # round_q_nth <文件> <起> <止> <第几个>
+  local f="$1" a="$2" b="$3" n="$4"
+  round_qsection "$f" "$a" "$b" | awk -v want="$n" '
     /^###[[:space:]]*问题/ { i++; if (i == want) { on = 1 } else if (on) { exit } }
-    on { print }
-  '
+    on { print }'
 }
+# 答题进度带轮次，换轮自动归零——不带的话下一轮会以为都答过了，跳过所有问题
+round_answered() {        # round_answered <进度文件> <当前轮次>
+  local raw; raw="$(cat "$1" 2>/dev/null || echo)"
+  [ "${raw%%:*}" = "$2" ] && echo "${raw##*:}" || echo 0
+}
+round_answered_set() { mkdir -p "$STATE_DIR"; printf '%s:%s' "$2" "$3" > "$1"; }
 
-# 答题进度记成「轮次:已答几个」，换轮自动归零——
-# 不带轮次的话，第二轮会以为你已经答过了，直接跳过所有问题。
+# 下面五个是上面那套通用机制的薄壳，专给第1步「听懂」用。
+#
+# 冒号要写成 (:|：) 这种并列，不能写成 [:：]——全角冒号是 3 个字节，
+# 方括号会把它拆成 3 个单字节，匹配就废了。这个坑栽过一次。
+#
+# 还有一条也是测试逮出来的：状态那一行长这样
+#   「轮次：第 2 轮   状态：还没听懂」
+# 两个字段【在同一行】，所以匹配不许锚定行首。
+listen_state() {
+  local r; r="$(round_state "$LISTEN_FILE" 听懂了)"
+  case "$r" in 到了) echo 听懂了 ;; 没开始) echo 没开始 ;; *) echo 还没听懂 ;; esac
+}
+listen_round()     { round_num "$LISTEN_FILE"; }
+listen_questions() { round_qsection "$LISTEN_FILE" '^##[[:space:]]*四、' '^##[[:space:]]*五、'; }
+listen_q_count()   { round_q_count  "$LISTEN_FILE" '^##[[:space:]]*四、' '^##[[:space:]]*五、'; }
+listen_q_nth()     { round_q_nth    "$LISTEN_FILE" '^##[[:space:]]*四、' '^##[[:space:]]*五、' "$1"; }
+
 LISTEN_PROGRESS="$STATE_DIR/答题进度"
-listen_answered() {
-  local raw r
-  raw="$(cat "$LISTEN_PROGRESS" 2>/dev/null || echo)"
-  r="${raw%%:*}"
-  [ "$r" = "$(listen_round)" ] && echo "${raw##*:}" || echo 0
-}
-listen_answered_set() {
-  mkdir -p "$STATE_DIR"
-  printf '%s:%s' "$(listen_round)" "$1" > "$LISTEN_PROGRESS"
-}
+listen_answered()     { round_answered "$LISTEN_PROGRESS" "$(listen_round)"; }
+listen_answered_set() { round_answered_set "$LISTEN_PROGRESS" "$(listen_round)" "$1"; }
+
 
 # 任务清单的路径，多处用到，集中在这里
 TASKS_FILE="$DOC_DIR/07-任务清单.md"
