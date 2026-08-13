@@ -525,7 +525,7 @@ provider_keyfile() { echo "$PROVIDER_DIR/$(provider_family "$1").key"; }
 role_provider() {
   local ef; ef="$(role_env "$1")"
   [ -f "$ef" ] || { echo 官方; return; }
-  local p; p="$(grep -m1 '^LOOP_PROVIDER=' "$ef" 2>/dev/null | cut -d= -f2-)"
+  local p; p="$(grep -m1 '^LOOP_PROVIDER=' "$ef" 2>/dev/null | cut -d= -f2- || true)"
   echo "${p:-自定义}"
 }
 
@@ -590,7 +590,7 @@ EOF
 # 不写就用默认的三份（要什么 / 凭什么是我们 / 什么算好），够绝大多数角色用。
 role_context() {
   local rf; rf="$(role_file "$1")"
-  local line; line="$(grep -m1 -E '^上下文(:|：)' "$rf" 2>/dev/null | sed -E 's/^上下文(:|：)[[:space:]]*//')"
+  local line; line="$(grep -m1 -E '^上下文(:|：)' "$rf" 2>/dev/null | sed -E 's/^上下文(:|：)[[:space:]]*//' || true)"
   [ -z "$line" ] && line="00-目标.md 02-共性与独特.md 03-什么算好.md"
   local f
   for f in $line; do

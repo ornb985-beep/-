@@ -904,7 +904,9 @@ cmd_council() {
   [ "$rc" -eq 3 ] && return 0
   if [ "$rc" -ne 0 ]; then report_failure "$rc" "点名的时候出错了"; return $?; fi
 
-  local picked; picked="$(grep -oE '^点名[:：].*' "$LAST_LOG" | tail -1 | sed -E 's/^点名(:|：)[[:space:]]*//')"
+  # || true：CEO 要是没照格式写「点名：」，grep 返回 1 + pipefail 会把脚本打死，
+  # 下面那句 if [ -z "$picked" ] 根本执行不到——而那句本来就是为这种情况写的。
+  local picked; picked="$(grep -oE '^点名[:：].*' "$LAST_LOG" | tail -1 | sed -E 's/^点名(:|：)[[:space:]]*//' || true)"
   if [ -z "$picked" ]; then
     rule
     warn "CEO 没点名（要么它觉得这事不用会诊，要么它没照格式写）。"
@@ -1238,15 +1240,30 @@ cmd_hire() {
       local files; files="$(ls "$pool"/*.md)"
       [ "$layer" = "执行" ] && files="$pool/执行总监.md
 $(ls "$pool"/*.md | grep -v /执行总监.md)"
-      for f in $files; do
-        n="$(basename "$f" .md)"
-        grep -q "^层：$layer" "$f" 2>/dev/null || continue
-        desc="$(grep -m1 '^一句话：' "$f" | sed 's/^一句话：//')"
-        if [ -f "$(role_file "$n")" ]; then
-          printf '    %s%-10s%s %s %s在岗%s\n' "$C_BOLD" "$n" "$C_OFF" "$desc" "$C_GREEN" "$C_OFF"
-        else
-          printf '    %-10s %s\n' "$n" "$desc"
-        fi
+      # 参谋层里有几种类型（常驻／大师／镜子／审美），常驻的排前面。
+      # 类型是已有的字段，看板也在用它——这里只是把它显示出来，没加新机制。
+      local pass typ
+      for pass in 常驻 大师 镜子 审美; do
+        for f in $files; do
+          n="$(basename "$f" .md)"
+          grep -q "^层：$layer" "$f" 2>/dev/null || continue
+          # || true 不能省：grep 没匹配到会返回 1，配上文件开头的
+          # set -euo pipefail（pipefail 让整条管道也返回 1），整个脚本会当场退出。
+          # 老角色文件没有「类型：」这一行，就是这么把 hire 整个打死的。
+          typ="$(grep -m1 '^类型：' "$f" 2>/dev/null | sed 's/^类型：//' || true)"
+          [ -z "$typ" ] && typ=常驻
+          [ "$layer" = "参谋" ] && [ "$typ" != "$pass" ] && continue
+          [ "$layer" = "执行" ] && [ "$pass" != "常驻" ] && continue
+          desc="$(grep -m1 '^一句话：' "$f" | sed 's/^一句话：//' || true)"
+          local tag=""
+          [ "$typ" != "常驻" ] && tag="${C_BLUE}[$typ]${C_OFF} "
+          if [ -f "$(role_file "$n")" ]; then
+            printf '    %s%s%s %s%s %s在岗%s\n' \
+              "$C_BOLD" "$(pad "$n" 14)" "$C_OFF" "$tag" "$desc" "$C_GREEN" "$C_OFF"
+          else
+            printf '    %s %s%s\n' "$(pad "$n" 14)" "$tag" "$desc"
+          fi
+        done
       done
     done
     say ""
@@ -1330,7 +1347,7 @@ cmd_cost() {
 
   say ""
   # 跟目标预算对一下——光看花了多少没用，要看占预算多少
-  local budget; budget="$(grep -oE '¥?[0-9]+ *元?/ *月|每月[^0-9]*[0-9]+' "$DOC_DIR/00-目标.md" 2>/dev/null | head -1)"
+  local budget; budget="$(grep -oE '¥?[0-9]+ *元?/ *月|每月[^0-9]*[0-9]+' "$DOC_DIR/00-目标.md" 2>/dev/null | head -1 || true)"
   [ -n "$budget" ] && say "${C_DIM}你在 00-目标.md 里写的预算：$budget${C_OFF}"
   say "${C_DIM}明细：${COST_LOG#"$ROOT/"}${C_OFF}"
 }
