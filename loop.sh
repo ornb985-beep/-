@@ -455,6 +455,210 @@ _run_director() {
 cmd_dispatch() { _run_director "派单 · 把 CEO 的决策拆成每个人的活" 派单 "11-派工单.md"; }
 cmd_roster()   { _run_director "排班 · 今天每个人做什么" 排班 "12-排班.md"; }
 
+# 蒸馏：把行业报告里的真实专家，做成可以单独提问的智能体。
+#
+# 【这件事唯一可能翻车的地方】蒸馏 ≠ 把这个人复活。
+# 「某某会说 XXX」是编的，而且借了真人的权威，比普通编造更糟。
+# 蒸馏出来的角色必须写死：超出他公开说过的部分，
+# 当场标明「这是从他的方法推的，他本人没这么说过」。
+cmd_distill() {
+  [ -f "$CMD_DIR/蒸馏.md" ] || die "缺少 .claude/commands/蒸馏.md"
+  local rpt; rpt="$(ls -t "$(role_workspace 行业专家)"/*行业报告.md 2>/dev/null | head -1)"
+  if [ -z "$rpt" ]; then
+    warn "还没有行业报告，没东西可蒸馏。"
+    say  "先跑：${C_BOLD}./loop.sh 行业报告 \"你的行业／议题\"${C_OFF}"
+    return 1
+  fi
+
+  title "蒸馏专家"
+  say "${C_DIM}原料：${rpt#"$ROOT/"}${C_OFF}"
+  rule
+
+  local before; before="$(roles_list | grep -c '^专家-' || true)"
+  local rc=0
+  claude_run "$CMD_DIR/蒸馏.md" "$rpt" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  if [ "$rc" -ne 0 ]; then report_failure "$rc" "蒸馏的时候出错了"; return $?; fi
+
+  local after; after="$(roles_list | grep -c '^专家-' || true)"
+  rule
+  if [ "$after" -gt "$before" ]; then
+    ok "蒸馏出 $((after-before)) 位："
+    roles_list | grep '^专家-' | sed 's/^/    /'
+    group_say "系统" "蒸馏了 $((after-before)) 位行业专家，他们能看到这之后的群聊。"
+    say ""
+    say "单独问：${C_BOLD}./loop.sh ask 专家-<名字> \"问题\"${C_OFF}"
+    say "一起议：${C_BOLD}./loop.sh 专家群 \"议题\"${C_OFF}"
+    say "用完封存：${C_BOLD}./loop.sh 封存 专家-<名字>${C_OFF}"
+  else
+    warn "没有新增任何专家角色，按没蒸馏成处理。"
+    return 1
+  fi
+}
+
+# 专家群：让蒸馏出来的专家依次就同一个议题发言，后面的看得见前面的。
+#
+# 为什么是依次不是同时：依次的好处是后面的人能反驳前面的，
+# 那才叫讨论；同时问只是拿到几份互不相干的独白。
+cmd_expert_panel() {
+  local topic="${1:-}"
+  [ -n "$topic" ] || die "用法：./loop.sh 专家群 \"要议什么\""
+  local experts; experts="$(roles_list | grep '^专家-' || true)"
+  if [ -z "$experts" ]; then
+    warn "还没有蒸馏出任何专家。"
+    say  "先跑：${C_BOLD}./loop.sh 行业报告 \"…\"${C_OFF} 然后 ${C_BOLD}./loop.sh 蒸馏${C_OFF}"
+    return 1
+  fi
+
+  title "专家群讨论：$topic"
+  say "${C_DIM}在场：$(printf '%s' "$experts" | tr '\n' ' ')${C_OFF}"
+  rule
+  group_say "CEO" "【专家群议题】$topic"
+
+  local who n=0
+  while IFS= read -r who; do
+    [ -z "$who" ] && continue
+    budget_ok || { warn "预算到顶，讨论中断。已经发言的都在群聊里。"; break; }
+    n=$((n+1))
+    rule
+    info "第 $n 位 · $who"
+
+    local q="【专家群讨论】$topic
+
+**先看群聊里前面几位说了什么。** 你是第 $n 位发言的。
+
+必须包含：
+1. **他明确说过的**（带出处）
+2. **从他的方法推的**（他本人没说过，标清楚）
+3. **条件对不对得上**：我们现在的处境跟他当年差在哪，这条建议[能直接用／要打折／用不了]
+4. **他最可能看走眼的地方**
+5. **如果你不同意前面某位的说法，直接点名说哪位、哪一条、为什么**
+   —— 这一条最重要。**都点头的讨论等于没讨论。**"
+
+    local ctx=(); local d
+    while IFS= read -r d; do [ -n "$d" ] && ctx+=("$d"); done < <(role_context "$who")
+    local rc=0
+    ROLE_ISOLATED=1 ask_role "$who" "$q" "${ctx[@]+"${ctx[@]}"}" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      group_say "$who" "$(tail -35 "$LAST_LOG" 2>/dev/null)"
+    else
+      warn "$who 这一轮没答成，跳过。"
+    fi
+  done <<< "$experts"
+
+  [ "$n" -eq 0 ] && { warn "一位都没发言成。"; return 1; }
+  rule
+  ok "$n 位发言完毕，全在 ${C_BOLD}docs/10-群聊.md${C_OFF}"
+  say "让 CEO 裁决：${C_BOLD}./loop.sh ceo${C_OFF}"
+}
+
+# 封存：这个角色用完了，收起来。不删——收进 .loop/封存/，随时能起复。
+cmd_archive_role() {
+  local who="${1:-}"
+  if [ -z "$who" ]; then
+    title "封存过的角色"
+    if [ -d "$STATE_DIR/封存" ]; then
+      find "$STATE_DIR/封存" -maxdepth 1 -name '*.md' -exec basename {} .md \; 2>/dev/null | sed 's/^/  /'
+    else
+      say "  还没封存过谁"
+    fi
+    say ""
+    say "封存：${C_BOLD}./loop.sh 封存 <名字>${C_OFF}　起复：${C_BOLD}./loop.sh 起复 <名字>${C_OFF}"
+    return 0
+  fi
+  [ -f "$(role_file "$who")" ] || die "「$who」不在岗（看看有谁：./loop.sh roles）"
+  mkdir -p "$STATE_DIR/封存"
+  mv "$(role_file "$who")" "$STATE_DIR/封存/$who.md"
+  [ -f "$(role_session "$who")" ] && mv "$(role_session "$who")" "$STATE_DIR/封存/$who.session"
+  ok "封存了：$who"
+  say "${C_DIM}没删。他说过的话还在群聊里，交付物还在 work/$who/，随时能起复。${C_OFF}"
+  group_say "系统" "$who 已封存。"
+}
+
+cmd_unarchive_role() {
+  local who="${1:-}"
+  [ -n "$who" ] || die "用法：./loop.sh 起复 <名字>"
+  [ -f "$STATE_DIR/封存/$who.md" ] || die "封存里没有「$who」"
+  mkdir -p "$ROLE_DIR"
+  mv "$STATE_DIR/封存/$who.md" "$(role_file "$who")"
+  [ -f "$STATE_DIR/封存/$who.session" ] && mv "$STATE_DIR/封存/$who.session" "$(role_session "$who")"
+  ok "起复了：$who"
+  group_say "系统" "$who 起复归队。"
+}
+
+# 行业报告：让行业专家去找 10 个真实操盘手的判断，一人一份落盘，最后综合。
+#
+# 跟「会诊」的区别：会诊是问我们自己的参谋；这个是去外面找【真人的战绩和说法】。
+# 关键是可追溯——一人一份单独写，带出处和时间，
+# 这样老板能回头核对"这个人说的跟网上搜到的案例对不对得上"。
+# 揉成一锅粥就没法核对了，那才是最危险的：读起来很专业，一句都验不了。
+cmd_industry() {
+  local topic="${1:-}"
+  [ -n "$topic" ] || die "用法：./loop.sh 行业报告 \"哪个行业／什么议题\""
+  if [ ! -f "$(role_file 行业专家)" ]; then
+    warn "还没有行业专家这个角色。"
+    say  "招他：${C_BOLD}./loop.sh hire 行业专家${C_OFF}"
+    return 1
+  fi
+
+  local ws; ws="$(role_workspace 行业专家)"; mkdir -p "$ws"
+  local stamp; stamp="$(date +%Y%m%d-%H%M%S)"
+  local deliver="$ws/$stamp-行业报告.md"
+  local id; id="$(task_add 行业专家 "行业报告：$topic" "${deliver#"$ROOT/"}")"
+
+  title "行业报告（第 $id 号）：$topic"
+  say "${C_DIM}目标 10 份实战判断，一人一份落盘带出处；找不够就明写找不够${C_OFF}"
+  rule
+  group_say "CEO → @行业专家" "【行业报告】$topic"$'\n\n'"交到：\`${deliver#"$ROOT/"}\`"
+
+  local ctx=(); local d
+  while IFS= read -r d; do [ -n "$d" ] && ctx+=("$d"); done < <(role_context 行业专家)
+
+  local instruction; instruction="$(cat <<EOF
+【这是一份行业报告的活。照你角色定义里的五步做，一步都不许省。】
+
+议题：$topic
+
+## 交付物
+写到这个文件：$deliver
+**必须是这个文件本身**——只在对话里说一遍不算交付。
+
+## 一人一份，不许揉在一起
+这份报告的全部价值在于【可追溯】：老板要能回头核对
+"这个人说的，跟网上能搜到的案例对不对得上"。
+**揉成一锅粥就没法核对了**——那才是最危险的：读起来很专业，一句都验不了。
+
+## 最后必须自己说一句
+「找到 __ 份够格的（目标 10），__ 份背景存疑，__ 份来自失败方。
+　够不够支撑一次不可逆的决定：[够 ／ 不够，还缺 ____]」
+
+**不够就说不够。** 一份只找到 3 个人、全是活着的报告，
+不足以支撑花大钱的决定——你自己说出来，别让 CEO 事后发现。
+
+干完在群里汇报三行：找到几份／最值得看的是谁为什么／哪一条你自己都觉得可疑。
+EOF
+)"
+
+  local rc=0
+  ROLE_ISOLATED=1 ask_role 行业专家 "$instruction" "${ctx[@]+"${ctx[@]}"}" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  if [ "$rc" -ne 0 ]; then report_failure "$rc" "做行业报告的时候出错了"; return $?; fi
+
+  group_say "行业专家" "$(tail -40 "$LAST_LOG" 2>/dev/null)"
+
+  rule
+  if [ -f "$deliver" ]; then
+    task_set_state "$id" "干完了"
+    local n; n="$(grep -c '^### 第' "$deliver" 2>/dev/null || echo 0)"
+    ok "交了：${C_BOLD}${deliver#"$ROOT/"}${C_OFF}（$(wc -l < "$deliver") 行，$n 份单独落盘的专家判断）"
+    say "让 CEO 看：${C_BOLD}./loop.sh 验收${C_OFF}　或直接裁决：${C_BOLD}./loop.sh ceo${C_OFF}"
+  else
+    task_set_state "$id" "没交东西"
+    warn "他说完了，但 ${deliver#"$ROOT/"} 不在——按【没交】处理。"
+    return 1
+  fi
+}
+
 # 会诊：CEO 判断该问谁 → 逐个问 → CEO 综合裁决。
 #
 # 这是组织架构里「CEO 咨询专家再裁决」那一段。
@@ -1073,6 +1277,10 @@ cmd_help() {
   ./loop.sh budget 50            设花钱上限（美元）。不设就不给跑自动
   ./loop.sh auto                 无人值守：自己往下跑，撞到闸门/预算/卡点就停
   ./loop.sh hire [名字...]       从模板招人（不写名字就看有哪些可招）
+  ./loop.sh 行业报告 "议题"       找 10 个真实操盘手的判断，一人一份落盘，综合成报告
+  ./loop.sh 蒸馏                 把报告里的真专家做成能单独提问的智能体
+  ./loop.sh 专家群 "议题"        让蒸馏出来的专家依次发言，后面的能反驳前面的
+  ./loop.sh 封存 <名字>          用完收起来（不删，随时 ./loop.sh 起复）
   ./loop.sh 会诊 "议题"          CEO 判断该问谁 → 逐个咨询 → 综合裁决
   ./loop.sh 派单                 执行总监把 CEO 的决策拆成每个人的活
   ./loop.sh 排班                 执行总监定今天每个员工做什么
@@ -1121,6 +1329,11 @@ main() {
     go|next|continue) cmd_go ;;
     status|st) cmd_status ;;
     ceo|操盘) cmd_ceo ;;
+    industry|行业报告) cmd_industry "${1:-}" ;;
+    distill|蒸馏) cmd_distill ;;
+    panel|专家群) cmd_expert_panel "${1:-}" ;;
+    archive|封存) cmd_archive_role "${1:-}" ;;
+    unarchive|起复) cmd_unarchive_role "${1:-}" ;;
     council|会诊) cmd_council "${1:-}" ;;
     dispatch|派单) cmd_dispatch ;;
     roster|排班) cmd_roster ;;
