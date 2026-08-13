@@ -409,6 +409,142 @@ cmd_explain() {
   claude_run "$CMD_DIR/explain.md" "${ctx[@]+"${ctx[@]}"}" || true
 }
 
+# 执行总监干的两件事：把 CEO 的决策拆成活（派单）、定今天谁做什么（排班）。
+#
+# 为什么要中间这一层：CEO 定「做什么、为什么」，总监定「谁做、什么时候、什么算完」。
+# 没有这一层，CEO 得亲自盯每个人每天干什么——那不叫操盘手，那叫工头。
+_run_director() {
+  local what="$1" cmd="$2" out="$3"
+  [ -f "$CMD_DIR/$cmd.md" ] || die "缺少 .claude/commands/$cmd.md"
+  if [ ! -f "$(role_file 执行总监)" ]; then
+    warn "还没有执行总监这个角色。"
+    say  "招他：${C_BOLD}./loop.sh hire 执行总监${C_OFF}"
+    return 1
+  fi
+
+  title "$what"
+  say "${C_DIM}在岗员工：$(roles_list | tr '\n' ' ')${C_OFF}"
+  rule
+
+  local ctx=()
+  [ -f "$DOC_DIR/09-操盘记录.md" ] && ctx+=("$DOC_DIR/09-操盘记录.md")
+  [ -f "$TASKS_FILE" ]            && ctx+=("$TASKS_FILE")
+  [ -f "$DOC_DIR/11-派工单.md" ]  && ctx+=("$DOC_DIR/11-派工单.md")
+  [ -f "$DOC_DIR/12-排班.md" ]    && ctx+=("$DOC_DIR/12-排班.md")
+
+  # 在岗名单要喂进去，否则会派给不存在的人
+  local roster="$STATE_DIR/在岗名单.md"
+  { printf '# 现在在岗的人（只能派给这些人）\n\n'; roles_list | sed 's/^/- /'; } > "$roster"
+  ctx+=("$roster")
+
+  local rc=0
+  ROLE_ISOLATED=1 ask_role 执行总监 "$(cat "$CMD_DIR/$cmd.md")" "${ctx[@]+"${ctx[@]}"}" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  if [ "$rc" -ne 0 ]; then report_failure "$rc" "$what 的时候出错了"; return $?; fi
+
+  group_say "执行总监" "$(tail -40 "$LAST_LOG" 2>/dev/null)"
+  rule
+  if [ -f "$DOC_DIR/$out" ]; then
+    ok "写好了：${C_BOLD}docs/$out${C_OFF}"
+  else
+    warn "没产出 docs/$out，按没做成处理。"
+    return 1
+  fi
+}
+
+cmd_dispatch() { _run_director "派单 · 把 CEO 的决策拆成每个人的活" 派单 "11-派工单.md"; }
+cmd_roster()   { _run_director "排班 · 今天每个人做什么" 排班 "12-排班.md"; }
+
+# 会诊：CEO 判断该问谁 → 逐个问 → CEO 综合裁决。
+#
+# 这是组织架构里「CEO 咨询专家再裁决」那一段。
+# 关键是 CEO 自己点名，不是全问——全问十个人要十几次调用、几十美元，
+# 而且大部分人对某个具体议题给不出增量意见。
+# 挑人本身就是判断力的一部分，把它自动化掉等于把判断推给了流程。
+cmd_council() {
+  local topic="${1:-}"
+  [ -n "$topic" ] || die "用法：./loop.sh 会诊 \"要议什么\""
+  [ -f "$CMD_DIR/点名.md" ] || die "缺少 .claude/commands/点名.md"
+  local onstaff; onstaff="$(roles_list | tr '\n' ' ')"
+  [ -n "$onstaff" ] || { warn "还没招人。先 ./loop.sh hire 战略 财务 风控"; return 1; }
+
+  title "会诊：$topic"
+  say "${C_DIM}在岗：$onstaff${C_OFF}"
+  rule
+  group_say "你" "【会诊议题】$topic"
+
+  # ── 第一步：CEO 点名 ────────────────────────────────
+  info "第一步 · CEO 判断该问谁"
+  local pick_prompt="$STATE_DIR/点名.md"
+  { cat "$CMD_DIR/点名.md"
+    printf '\n\n## 现在在岗的人\n%s\n\n## 要会诊的议题\n%s\n' "$onstaff" "$topic"
+  } > "$pick_prompt"
+
+  local rc=0
+  claude_run "$pick_prompt" "$DOC_DIR/00-目标.md" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  if [ "$rc" -ne 0 ]; then report_failure "$rc" "点名的时候出错了"; return $?; fi
+
+  local picked; picked="$(grep -oE '^点名[:：].*' "$LAST_LOG" | tail -1 | sed -E 's/^点名(:|：)[[:space:]]*//')"
+  if [ -z "$picked" ]; then
+    rule
+    warn "CEO 没点名（要么它觉得这事不用会诊，要么它没照格式写）。"
+    say  "上面是它的说法。要硬会诊就直接 ./loop.sh ask <名字> \"$topic\""
+    return 1
+  fi
+
+  rule
+  ok "CEO 点了：${C_BOLD}$picked${C_OFF}"
+  group_say "CEO" "这个议题我点这几个人：$picked"
+
+  # ── 第二步：逐个问 ──────────────────────────────────
+  local n=0 who
+  for who in $picked; do
+    if [ ! -f "$(role_file "$who")" ]; then
+      warn "「$who」不在岗，跳过。（招他：./loop.sh hire $who）"
+      continue
+    fi
+    budget_ok || { warn "预算到顶，会诊中断。已经问过的意见都在群聊里。"; break; }
+    n=$((n+1))
+    # 用位置参数数个数，不用 wc -w —— wc -w 数不了中文（实测返回 0），
+    # 而这套东西的角色名全是中文。
+    local total; total="$(set -- $picked; echo $#)"
+    rule
+    info "第二步 · 问「$who」（$n/$total）"
+
+    local q="【会诊】$topic
+
+这是一次会诊，不是闲聊。**先看群聊里别人已经说了什么**，
+然后只说你这个位置上、别人给不出的那部分。
+
+必须包含：
+1. 结论先行（一句话）
+2. 依据（能核对的，带来源和日期；查不到就写查不到）
+3. 置信度：高／中／低
+4. **反对你自己的最强论据**——这条不写，你的意见对 CEO 没有价值
+5. 如果你不同意群里已有的某条判断，直接点名说哪条、为什么"
+
+    local ctx=(); local d
+    while IFS= read -r d; do [ -n "$d" ] && ctx+=("$d"); done < <(role_context "$who")
+    group_say "CEO → @$who" "【会诊】$topic"
+    rc=0
+    ROLE_ISOLATED=1 ask_role "$who" "$q" "${ctx[@]+"${ctx[@]}"}" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      group_say "$who" "$(tail -40 "$LAST_LOG" 2>/dev/null)"
+    else
+      warn "「$who」这一轮没答成，跳过。"
+    fi
+  done
+
+  [ "$n" -eq 0 ] && { warn "一个人都没问成，会诊没开起来。"; return 1; }
+
+  # ── 第三步：CEO 裁决 ────────────────────────────────
+  rule
+  info "第三步 · CEO 综合裁决"
+  budget_ok || { warn "预算到顶，没跑裁决。专家意见都在群聊里，可以之后跑 ./loop.sh ceo"; return 1; }
+  cmd_ceo
+}
+
 # 派活给某个角色：他自己去搜、去做，交付一个文件，等 CEO 验收。
 #
 # 跟 ask 的区别：ask 是问一句答一句；派活是「他独立干完一件事并交东西」。
@@ -666,12 +802,33 @@ cmd_hire() {
   [ -d "$pool" ] || die "找不到角色模板目录：roles-模板/"
 
   if [ "$#" -eq 0 ] || [ -z "${1:-}" ]; then
-    title "可以招的人"
-    local f n
-    for f in "$pool"/*.md; do
-      n="$(basename "$f" .md)"
-      if [ -f "$(role_file "$n")" ]; then printf '  %s%-8s%s 已在岗\n' "$C_GREEN" "$n" "$C_OFF"
-      else printf '  %-8s %s\n' "$n" "$(sed -n '1p' "$f" | sed 's/.*\*\*，//; s/$//' | cut -c1-40)"; fi
+    title "组织架构：你 → CEO → 两个分支"
+    say ""
+    say "  ${C_DIM}CEO（./loop.sh ceo）不用招，它一直在。${C_OFF}"
+    say ""
+    local layer f n desc
+    for layer in 参谋 执行; do
+      if [ "$layer" = "参谋" ]; then
+        printf '  %s左分支 · 参谋层%s %s——CEO 咨询他们，只出意见书，不指挥执行%s\n' \
+          "$C_BOLD" "$C_OFF" "$C_DIM" "$C_OFF"
+      else
+        printf '\n  %s右分支 · 执行层%s %s——CEO 派单给执行总监，总监再拆给下面的人%s\n' \
+          "$C_BOLD" "$C_OFF" "$C_DIM" "$C_OFF"
+      fi
+      # 执行总监是右分支的头，排最前面；其余按名字排
+      local files; files="$(ls "$pool"/*.md)"
+      [ "$layer" = "执行" ] && files="$pool/执行总监.md
+$(ls "$pool"/*.md | grep -v /执行总监.md)"
+      for f in $files; do
+        n="$(basename "$f" .md)"
+        grep -q "^层：$layer" "$f" 2>/dev/null || continue
+        desc="$(grep -m1 '^一句话：' "$f" | sed 's/^一句话：//')"
+        if [ -f "$(role_file "$n")" ]; then
+          printf '    %s%-10s%s %s %s在岗%s\n' "$C_BOLD" "$n" "$C_OFF" "$desc" "$C_GREEN" "$C_OFF"
+        else
+          printf '    %-10s %s\n' "$n" "$desc"
+        fi
+      done
     done
     say ""
     say "招人：${C_BOLD}./loop.sh hire 战略 财务 风控${C_OFF}"
@@ -916,7 +1073,10 @@ cmd_help() {
   ./loop.sh budget 50            设花钱上限（美元）。不设就不给跑自动
   ./loop.sh auto                 无人值守：自己往下跑，撞到闸门/预算/卡点就停
   ./loop.sh hire [名字...]       从模板招人（不写名字就看有哪些可招）
-  ./loop.sh 派活 <角色> "任务"    派活：他自己去搜去做，交一个文件回来
+  ./loop.sh 会诊 "议题"          CEO 判断该问谁 → 逐个咨询 → 综合裁决
+  ./loop.sh 派单                 执行总监把 CEO 的决策拆成每个人的活
+  ./loop.sh 排班                 执行总监定今天每个员工做什么
+  ./loop.sh 派活 <角色> "任务"    单独派一件活给某个人
   ./loop.sh 验收                 CEO 把干完的活逐个看一遍，判行不行
   ./loop.sh 台账                 谁手上有什么活、干完没有、验收没有
   ./loop.sh say "话"             在群里说一句，所有角色下次开口前都会看到
@@ -961,6 +1121,9 @@ main() {
     go|next|continue) cmd_go ;;
     status|st) cmd_status ;;
     ceo|操盘) cmd_ceo ;;
+    council|会诊) cmd_council "${1:-}" ;;
+    dispatch|派单) cmd_dispatch ;;
+    roster|排班) cmd_roster ;;
     assign|派活) cmd_assign "${1:-}" "${2:-}" ;;
     review|验收) cmd_review ;;
     board|台账) cmd_board ;;
