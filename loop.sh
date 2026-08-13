@@ -409,6 +409,134 @@ cmd_explain() {
   claude_run "$CMD_DIR/explain.md" "${ctx[@]+"${ctx[@]}"}" || true
 }
 
+# 派活给某个角色：他自己去搜、去做，交付一个文件，等 CEO 验收。
+#
+# 跟 ask 的区别：ask 是问一句答一句；派活是「他独立干完一件事并交东西」。
+# 交付物必须是文件——**说了 ≠ 交了**，这是这套东西反复栽过的那个坑。
+cmd_assign() {
+  local role="${1:-}" task="${2:-}"
+  [ -n "$role" ] || die "用法：./loop.sh 派活 <角色> \"要他干什么\""
+  [ -f "$(role_file "$role")" ] || {
+    warn "没有「$role」这个角色。现有的：$(roles_list | tr '\n' ' ')"
+    say  "招人：./loop.sh hire"; exit 1; }
+  [ -n "$task" ] || die "要他干什么？用法：./loop.sh 派活 $role \"任务\""
+
+  local ws; ws="$(role_workspace "$role")"
+  mkdir -p "$ws"
+  local stamp; stamp="$(date +%Y%m%d-%H%M%S)"
+  local deliver="$ws/$stamp-交付.md"
+
+  local id; id="$(task_add "$role" "$task" "${deliver#"$ROOT/"}")"
+
+  title "派活给「$role」（第 $id 号）"
+  say "${C_DIM}$task${C_OFF}"
+  say "${C_DIM}他的工作区：${ws#"$ROOT/"}/${C_OFF}"
+  rule
+
+  group_say "你 → @$role" "【派活 #$id】$task"$'\n\n'"交到：\`${deliver#"$ROOT/"}\`"
+
+  local ctx=(); local d
+  while IFS= read -r d; do [ -n "$d" ] && ctx+=("$d"); done < <(role_context "$role")
+
+  local instruction; instruction="$(cat <<EOF
+【这是一件派给你的活，不是问你一句话。你要自己去查、去做，最后交一个文件。】
+
+任务：$task
+
+## 你的工作区
+$ws/
+搜集的资料、草稿、中间产物，全部放这个目录里。这是**你自己的地盘**，别人不会动。
+
+## 你的交付物
+写到这个文件：$deliver
+
+**交付物必须是这个文件本身**。只在对话里说一遍不算交付——
+这套东西反复栽在同一个坑上：**说了 ≠ 交了，跑过 ≠ 跑成了**。
+
+## 项目文档是只读的
+\`docs/\` 下的文件是大家共同的事实基础，**你只能读，不许改**。
+你觉得哪份文档写错了，写进交付物里说明理由，让 CEO 判断，别自己动手改。
+
+## 交付物里必须有这几段
+1. **结论先行**：一句话说清你做出了什么／得出了什么
+2. **过程**：你查了什么、从哪查的（带链接和日期）
+3. **不确定的地方**：哪些是查证的，哪些是推断的，哪些是猜的
+4. **验收怎么验**：CEO 拿什么标准判断你这活干得行不行——你自己先说
+5. **卡住的地方**：有就写，没有写"没卡住"
+
+干完之后在群里说一句话汇报（三行以内：做完了什么／最要紧的一条发现／要 CEO 定什么）。
+EOF
+)"
+
+  local rc=0
+  ask_role "$role" "$instruction" "${ctx[@]+"${ctx[@]}"}" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  if [ "$rc" -ne 0 ]; then report_failure "$rc" "「$role」干活的时候出错了"; return $?; fi
+
+  group_say "$role" "$(tail -40 "$LAST_LOG" 2>/dev/null)"
+
+  # 交付物在不在，决定这活算不算干完 —— 说了 ≠ 交了
+  rule
+  if [ -f "$deliver" ]; then
+    task_set_state "$id" "干完了"
+    ok "交了：${C_BOLD}${deliver#"$ROOT/"}${C_OFF}（$(wc -l < "$deliver") 行）"
+    say "让 CEO 验收：${C_BOLD}./loop.sh 验收${C_OFF}"
+  else
+    task_set_state "$id" "没交东西"
+    warn "他说完了，但 ${deliver#"$ROOT/"} 不在——按【没交】处理。"
+    say  "看看他到底卡在哪：${LAST_LOG#"$ROOT/"}"
+    say  "或者直接再派一次，把任务说得更具体。"
+    return 1
+  fi
+}
+
+# CEO 验收：把干完的活逐个看一遍，判行不行
+cmd_review() {
+  [ -f "$CMD_DIR/review.md" ] || die "缺少 .claude/commands/review.md"
+  local pending; pending="$(tasks_pending_review)"
+  if [ -z "$pending" ]; then
+    title "没有等着验收的活"
+    say "派活：${C_BOLD}./loop.sh 派活 <角色> \"任务\"${C_OFF}"
+    say "看台账：${C_BOLD}./loop.sh 台账${C_OFF}"
+    return 0
+  fi
+
+  title "CEO 验收"
+  printf '%s\n' "$pending" | awk -F'\t' '{printf "  #%s  %-8s %s\n", $1, $2, substr($3,1,44)}'
+  rule
+
+  local ctx=() f
+  while IFS= read -r f; do
+    f="$(printf '%s' "$f" | cut -f5)"
+    [ -n "$f" ] && [ -f "$ROOT/$f" ] && ctx+=("$ROOT/$f")
+  done <<< "$pending"
+  [ -f "$STANDARDS_FILE" ] && ctx+=("$STANDARDS_FILE")
+  [ -f "$DOC_DIR/00-目标.md" ] && ctx+=("$DOC_DIR/00-目标.md")
+
+  local rc=0
+  claude_run "$CMD_DIR/review.md" "${ctx[@]+"${ctx[@]}"}" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  if [ "$rc" -ne 0 ]; then report_failure "$rc" "验收的时候出错了"; return $?; fi
+
+  group_say "CEO" "$(tail -50 "$LAST_LOG" 2>/dev/null)"
+  rule
+  say "验收结论已进群聊。${C_DIM}通过的自己去台账里改成「过了」，打回的重新派活。${C_OFF}"
+  say "台账：${C_BOLD}./loop.sh 台账${C_OFF}"
+}
+
+# 看台账：谁手上有什么活、干完没有、验收没有
+cmd_board() {
+  if [ ! -f "$TASK_LOG" ]; then
+    title "还没派过活"
+    say "派活：${C_BOLD}./loop.sh 派活 <角色> \"任务\"${C_OFF}"
+    return 0
+  fi
+  title "派活台账"
+  awk -F'\t' 'NR>1 {printf "  #%-3s %-8s %-7s %s\n", $1, $2, $4, substr($3,1,46)}' "$TASK_LOG"
+  say ""
+  awk -F'\t' 'NR>1 {c[$4]++} END {for (k in c) printf "  %s %d 件\n", k, c[k]}' "$TASK_LOG"
+}
+
 # 设/看预算上限
 cmd_budget() {
   local v="${1:-}"
@@ -785,6 +913,9 @@ cmd_help() {
   ./loop.sh budget 50            设花钱上限（美元）。不设就不给跑自动
   ./loop.sh auto                 无人值守：自己往下跑，撞到闸门/预算/卡点就停
   ./loop.sh hire [名字...]       从模板招人（不写名字就看有哪些可招）
+  ./loop.sh 派活 <角色> "任务"    派活：他自己去搜去做，交一个文件回来
+  ./loop.sh 验收                 CEO 把干完的活逐个看一遍，判行不行
+  ./loop.sh 台账                 谁手上有什么活、干完没有、验收没有
   ./loop.sh say "话"             在群里说一句，所有角色下次开口前都会看到
   ./loop.sh cost                 花了多少钱、哪一步最贵
   ./loop.sh roles                看看现在有哪些角色，各自聊过几次
@@ -827,6 +958,9 @@ main() {
     go|next|continue) cmd_go ;;
     status|st) cmd_status ;;
     ceo|操盘) cmd_ceo ;;
+    assign|派活) cmd_assign "${1:-}" "${2:-}" ;;
+    review|验收) cmd_review ;;
+    board|台账) cmd_board ;;
     auto|自动) cmd_auto ;;
     budget|预算) cmd_budget "${1:-}" ;;
     close|结项) cmd_close ;;

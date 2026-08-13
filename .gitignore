@@ -28,3 +28,4 @@ target/
 
 # Claude Code 的本地个人设置（团队共享的是 settings.json）
 .claude/settings.local.json
+work/

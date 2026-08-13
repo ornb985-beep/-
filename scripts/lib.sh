@@ -309,6 +309,47 @@ role_session() { echo "$ROLE_DIR/$1.session"; }
 #
 # 要接非官方的便宜服务，在 .loop/roles/<名字>.env 里写 endpoint 和 key，
 # 那个文件会在调用这个角色时被 source 进去，只影响他一个人。
+# ---------- 派活台账 ----------
+#
+# 每个角色有自己的工作区 work/<角色>/，交付物落在那儿，互不踩。
+# 项目文档 docs/ 所有人只读——那是共同的事实基础，谁都不许偷偷改。
+#
+# 为什么要台账：光有「问答」不够。真干活是
+#   派活 → 他自己去搜、去做 → 交付一个文件 → CEO 验收行不行。
+# 没有台账就看不出「谁手上有什么活、干完没有、验收过没有」。
+WORK_DIR="$ROOT/work"
+TASK_LOG="$STATE_DIR/tasks.tsv"
+
+role_workspace() { echo "$WORK_DIR/$1"; }
+
+task_log_init() {
+  mkdir -p "$STATE_DIR"
+  [ -f "$TASK_LOG" ] || printf '编号\t派给谁\t干什么\t状态\t交付物\t时间\n' > "$TASK_LOG"
+}
+
+# task_add <角色> <任务> <交付物路径> —— 返回编号
+task_add() {
+  task_log_init
+  local n; n="$(( $(wc -l < "$TASK_LOG") ))"   # 表头占一行，所以这就是新编号
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$n" "$1" "$2" "派了" "$3" "$(date '+%m-%d %H:%M')" >> "$TASK_LOG"
+  echo "$n"
+}
+
+task_set_state() {
+  local id="$1" st="$2"
+  [ -f "$TASK_LOG" ] || return 0
+  awk -F'\t' -v OFS='\t' -v id="$id" -v st="$st" \
+    'NR==1||$1!=id{print;next}{$4=st;print}' "$TASK_LOG" > "$TASK_LOG.tmp" \
+    && mv "$TASK_LOG.tmp" "$TASK_LOG"
+}
+
+# 等着验收的活（干完了但还没验收）
+tasks_pending_review() {
+  [ -f "$TASK_LOG" ] || return 0
+  awk -F'\t' 'NR>1 && $4=="干完了"' "$TASK_LOG"
+}
+
 role_model() {
   local rf; rf="$(role_file "$1")"
   grep -m1 -E '^模型(:|：)' "$rf" 2>/dev/null | sed -E 's/^模型(:|：)[[:space:]]*//' || true
