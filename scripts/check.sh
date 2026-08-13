@@ -143,6 +143,12 @@ if [ -f scripts/test-接口.sh ]; then
   run "接口隔离（每个员工一个独立接口）" bash scripts/test-接口.sh
 fi
 
+# 第0步「听懂」。两头都要守住：没听懂却往下走了，和问个没完出不来。
+# 顺带守住九步清单那三份拷贝不漂移。
+if [ -f scripts/test-听懂.sh ]; then
+  run "第0步 听懂（引导式问答 ＋ 九步清单不漂移）" bash scripts/test-听懂.sh
+fi
+
 # ---------------- 项目自定义检查 ----------------
 if [ -f check.local.sh ]; then
   run "项目自定义检查" bash check.local.sh

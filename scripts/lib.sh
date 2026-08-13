@@ -57,11 +57,12 @@ state_set() {
 
 # ---------- 阶段定义 ----------
 # 顺序即流水线顺序。改这里就能增删阶段。
-STAGES=(goal giants edge taste spec unknowns stack plan build done)
+STAGES=(听懂 goal giants edge taste spec unknowns stack plan build done)
 
 # 阶段的中文名，给人看的
 stage_label() {
   case "$1" in
+    听懂)     echo "第0步 · 先听懂你到底要什么（要问你几个问题）" ;;
     goal)     echo "第1步 · 把想法变成一句能落地的目标" ;;
     giants)   echo "第2步 · 站在巨人肩上：把前人最好的全扒出来" ;;
     edge)     echo "第3步 · 共性与独特：凭什么是我们（只有你能拍板）" ;;
@@ -80,7 +81,7 @@ stage_label() {
 # 判断依据：这一步定的是「生意问题」还是「技术问题」。生意问题必须你拍板。
 stage_needs_signoff() {
   case "$1" in
-    edge|taste|spec|stack) return 0 ;;
+    听懂|edge|taste|spec|stack) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -88,6 +89,7 @@ stage_needs_signoff() {
 # 阶段产出的文档
 stage_doc() {
   case "$1" in
+    听懂)     echo "$DOC_DIR/00-听到的.md" ;;
     goal)     echo "$DOC_DIR/00-目标.md" ;;
     giants)   echo "$DOC_DIR/01-巨人的肩膀.md" ;;
     edge)     echo "$DOC_DIR/02-共性与独特.md" ;;
@@ -98,6 +100,52 @@ stage_doc() {
     plan)     echo "$DOC_DIR/07-任务清单.md" ;;
     *)        echo "" ;;
   esac
+}
+
+# ---------- 第0步「听懂」的多轮状态 ----------
+#
+# 这一步跟别的步不一样：它是【引导式】的，可能要问你好几轮。
+# 所以它的产物里有一行机器读的状态：
+#
+#     轮次：第 2 轮   状态：还没听懂
+#
+# 还没听懂 → 停下来等你回答，不往下走
+# 听懂了   → 才轮到你点头确认，然后进第1步
+#
+# 注意冒号要写成 (:|：) 这种并列，不能写成 [:：]——
+# 全角冒号是 3 个字节，方括号会把它拆成 3 个单字节，匹配就废了。
+# 这个坑这个项目已经栽过一次（角色的「上下文：」那行）。
+LISTEN_FILE="$DOC_DIR/00-听到的.md"
+LISTEN_MAX_ROUNDS="${LISTEN_MAX_ROUNDS:-3}"
+
+# 注意这两个都【不锚定行首】。
+# 模板里那一行长这样：「轮次：第 2 轮   状态：还没听懂」——
+# 两个字段在同一行上，用 ^状态 去匹配永远匹配不到。
+# （这条是测试逮出来的：文档明明写着"听懂了"，机器却一直当成"还没听懂"。）
+#
+# 「状态：还没听懂」不会被误判成听懂了——冒号后面紧跟的是"还"不是"听"。
+listen_state() {
+  [ -f "$LISTEN_FILE" ] || { echo 没开始; return; }
+  if grep -qE '状态(:|：)[[:space:]]*听懂了' "$LISTEN_FILE" 2>/dev/null; then
+    echo 听懂了
+  else
+    echo 还没听懂
+  fi
+}
+
+listen_round() {
+  local n
+  n="$(grep -m1 -oE '轮次(:|：)[[:space:]]*第[[:space:]]*[0-9]+' "$LISTEN_FILE" 2>/dev/null \
+       | grep -oE '[0-9]+' || true)"
+  echo "${n:-0}"
+}
+
+# 把「## 四、我不许替你猜的」那一节原样打出来。
+# 为什么要单独摘出来：问题在文档中间，不摘的话人得自己去翻文件找。
+listen_questions() {
+  [ -f "$LISTEN_FILE" ] || return 0
+  awk '/^##[[:space:]]*四、/ { on=1 } on && /^##[[:space:]]*五、/ { exit } on { print }' \
+    "$LISTEN_FILE" 2>/dev/null
 }
 
 # 任务清单的路径，多处用到，集中在这里

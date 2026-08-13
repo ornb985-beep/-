@@ -14,6 +14,12 @@ import html
 import glob
 import datetime
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# 九步的清单只有一份真身，在 状态.py 里（它又对着 lib.sh 有防漂移测试）。
+# 这儿曾经自己抄了一份，加「第0步 听懂」的时候就漏了——
+# 结果是看板上的进度条比实际少一格，而且看不出来是错的。
+from 状态 import STAGES  # noqa: E402
+
 ROOT = sys.argv[1] if len(sys.argv) > 1 else "."
 L, D = os.path.join(ROOT, ".loop"), os.path.join(ROOT, "docs")
 
@@ -27,11 +33,7 @@ def rd(p, default=""):
 def rdl(p):
     return [x for x in rd(p).splitlines() if x.strip()]
 
-STAGES = [("goal","把想法变成目标"),("giants","站在巨人肩上"),("edge","共性与独特"),
-          ("taste","什么算好"),("spec","要做什么"),("unknowns","我不懂的"),
-          ("stack","技术与落地"),("plan","任务清单"),("build","自动开做"),("done","完成")]
-
-stage = rd(os.path.join(L,"stage"),"goal").strip() or "goal"
+stage = rd(os.path.join(L,"stage"),STAGES[0][0]).strip() or STAGES[0][0]
 idea  = rd(os.path.join(L,"原始想法.txt"),"（还没开始）").strip()
 budget= rd(os.path.join(L,"budget"),"").strip()
 closed= rd(os.path.join(L,"closed"),"no").strip() == "yes"
@@ -141,7 +143,7 @@ def person(r, extra=""):
 stage_i = [s for s,_ in STAGES].index(stage) if stage in [s for s,_ in STAGES] else 0
 steps = "".join(
     f'<div class="st {"done" if i<stage_i else "now" if i==stage_i else ""}">'
-    f'<i>{i+1 if i<9 else "✓"}</i><span>{e(t)}</span></div>'
+    f'<i>{i if i < len(STAGES)-1 else "✓"}</i><span>{e(t)}</span></div>'
     for i,(s,t) in enumerate(STAGES))
 
 chat_html = "".join(

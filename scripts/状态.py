@@ -22,16 +22,22 @@ def rd(p, default=""):
 def rdl(p):
     return [x for x in rd(p).splitlines() if x.strip()]
 
-STAGES = [("goal", "把想法变成目标"), ("giants", "站在巨人肩上"), ("edge", "共性与独特"),
-          ("taste", "什么算好"), ("spec", "要做什么"), ("unknowns", "我不懂的"),
-          ("stack", "技术与落地"), ("plan", "任务清单"), ("build", "自动开做"),
-          ("done", "完成")]
+# 下面这三张表是从 scripts/lib.sh 抄过来的（STAGES / stage_needs_signoff / stage_doc）。
+#
+# 抄一份就有漂移的风险：哪天 lib.sh 改了这儿没跟着改，界面上显示的
+# 进度、拍板闸门、文档名就全是错的，而且【看不出来是错的】。
+# 所以 scripts/test-听懂.sh 里有一条硬测试，逐项对着 lib.sh 比。改这儿必须两边一起改。
+STAGES = [("听懂", "先听懂你要什么"), ("goal", "目标和算账"), ("giants", "站在巨人肩上"),
+          ("edge", "共性与独特"), ("taste", "什么算好"), ("spec", "要做什么"),
+          ("unknowns", "我不懂的"), ("stack", "技术与落地"), ("plan", "任务清单"),
+          ("build", "自动开做"), ("done", "完成")]
 
-# 这四步是生意问题，只有人能定。跟 loop.sh 的 stage_needs_signoff 必须一致。
-SIGNOFF = {"edge", "taste", "spec", "stack"}
+# 这几步是生意问题，只有人能定。
+SIGNOFF = {"听懂", "edge", "taste", "spec", "stack"}
 
-# 每一步产出哪份文档。跟 loop.sh 的 stage_doc 必须一致。
+# 每一步产出哪份文档。
 STAGE_DOC = {
+    "听懂": "00-听到的.md",
     "goal": "00-目标.md", "giants": "01-巨人的肩膀.md", "edge": "02-共性与独特.md",
     "taste": "03-什么算好.md", "spec": "04-要做什么.md", "unknowns": "05-我不懂的.md",
     "stack": "06-技术与落地.md", "plan": "07-任务清单.md",
@@ -85,7 +91,7 @@ def providers(root):
 def read_all(root):
     L, D = os.path.join(root, ".loop"), os.path.join(root, "docs")
 
-    stage = rd(os.path.join(L, "stage"), "goal").strip() or "goal"
+    stage = rd(os.path.join(L, "stage"), STAGES[0][0]).strip() or STAGES[0][0]
     keys = [s for s, _ in STAGES]
     stage_i = keys.index(stage) if stage in keys else 0
 
@@ -171,7 +177,7 @@ def read_all(root):
         doc = STAGE_DOC.get(k, "")
         docpath = os.path.join(D, doc) if doc else ""
         steps.append(dict(
-            key=k, label=label, n=i + 1,
+            key=k, label=label, n=i,      # 听懂=第0步，goal=第1步…
             state="done" if i < stage_i else "now" if i == stage_i else "todo",
             signoff=k in SIGNOFF,
             signed=rd(os.path.join(L, "signoff_" + k), "no").strip() == "yes",

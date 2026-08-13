@@ -63,6 +63,14 @@ run_stage() {
     [ -n "$d" ] && [ -f "$d" ] && ctx+=("$d")
   done
 
+  # 重跑这一步时，把上一版也给它看。
+  #
+  # 「听懂」那一步天然要跑好几轮（引导式问答）：第2轮必须看得见
+  # 第1轮问了什么、你答了什么，否则每轮都从头把同样的问题再问一遍。
+  # 对别的步也是对的——back 退回来重做时，看着旧版改比从零重写强。
+  local own; own="$(stage_doc "$stage")"
+  [ -n "$own" ] && [ -f "$own" ] && ctx+=("$own")
+
   local rc=0
   claude_run "$cmd_file" "${ctx[@]+"${ctx[@]}"}" || rc=$?
   if [ "$rc" -eq 3 ]; then
@@ -302,8 +310,9 @@ cmd_start() {
 EOF
   fi
 
-  state_set stage goal
+  state_set stage 听懂
   ok "记下了：$goal"
+  say "${C_DIM}第一件事不是开工，是先把你这句话拆开、听懂。它可能要问你几个问题。${C_OFF}"
   cmd_go
 }
 
@@ -340,6 +349,22 @@ cmd_go() {
     fi
   fi
 
+  # 第0步是引导式的，可能要问你好几轮。
+  #
+  # 它自己没在文档里写「状态：听懂了」之前，再敲一次 go 不算你点头——
+  # 不拦的话，下面那段会把这次 go 当成确认，直接溜进第1步，
+  # 而它其实还没听懂。后面八步就全建立在一个误解上了。
+  #
+  # 这时候 go 只把问题再显示一遍，【不重跑】：重跑要花钱，
+  # 而且你没给新信息，再问一轮只会得到一模一样的问题。
+  # 要往前走就答一句：./loop.sh 答 "..."
+  if [ "$stage" = "听懂" ] \
+     && [ "$(state_get ran_听懂 no)" = "yes" ] \
+     && [ "$(listen_state)" != "听懂了" ]; then
+    listen_gate
+    return 2
+  fi
+
   if stage_needs_signoff "$stage" \
      && [ "$(state_get "ran_$stage" no)" = "yes" ] \
      && [ "$(state_get "signoff_$stage" no)" = "no" ]; then
@@ -367,6 +392,13 @@ cmd_go() {
   # 不停的话，后面每一步都建立在空气上，而且每步看着都是 ✓。
   [ "$rc" -ne 0 ] && return "$rc"
 
+  # 「听懂」是唯一一个可能要跑好几轮的阶段。
+  # 它自己在文档里写「状态：听懂了 / 还没听懂」，我们照着它的话决定停不停。
+  if [ "$stage" = "听懂" ] && [ "$(listen_state)" != "听懂了" ]; then
+    listen_gate
+    return 2
+  fi
+
   if stage_needs_signoff "$stage"; then
     signoff_gate "$stage"
     return 0
@@ -374,6 +406,79 @@ cmd_go() {
 
   state_set stage "$(next_stage "$stage")"
   cmd_go   # 不需要点头的，直接连着往下跑
+}
+
+# 它还没听懂，要问你几个问题。把问题直接打出来，别让你去翻文件。
+listen_gate() {
+  local round; round="$(listen_round)"
+  local maxr="$LISTEN_MAX_ROUNDS"
+
+  rule
+  if [ "$round" -ge "$maxr" ]; then
+    title "问了 $round 轮，还是没聊拢"
+    say "${C_DIM}这通常不是问题问得不对，是这个想法本身还没成形。它在文件末尾给了你三条路。${C_OFF}"
+  else
+    title "它有几个问题要问你 —— 这些它不许替你猜"
+  fi
+  say ""
+  local qs; qs="$(listen_questions)"
+  if [ -n "$qs" ]; then
+    printf '%s\n' "$qs"
+  else
+    say "  ${C_DIM}（问题在 ${LISTEN_FILE#"$ROOT/"} 的第四节）${C_OFF}"
+  fi
+  rule
+  say "全文在：${C_BOLD}${LISTEN_FILE#"$ROOT/"}${C_OFF}　${C_DIM}（第 $round 轮，最多 $maxr 轮）${C_OFF}"
+  say ""
+  say "怎么回答，两条路随便挑："
+  say "  ${C_BOLD}./loop.sh 答 \"1A 2C 3 我其实更在意的是…\"${C_OFF}"
+  say "  ${C_DIM}或者直接打开那个文件，在末尾想写什么写什么，写完跑 ./loop.sh go${C_OFF}"
+  say ""
+  say "${C_DIM}答不上来也可以直说「这个我答不上来」——那本身就是有用的信息。${C_OFF}"
+  rule
+}
+
+# 回答第0步的问题，然后自动跑下一轮
+cmd_answer() {
+  local text="${1:-}"
+  [ -n "$text" ] || die '用法：./loop.sh 答 "1A 2C 3 我其实更在意的是…"'
+  [ -f "$LISTEN_FILE" ] || die "还没有要回答的东西。先跑 ./loop.sh start \"你的想法\""
+
+  local round; round="$(listen_round)"
+  {
+    printf '\n## 你的回答（第 %s 轮问的）\n\n' "$round"
+    printf '%s\n' "$text"
+  } >> "$LISTEN_FILE"
+  ok "记下了。"
+  say "${C_DIM}接着让它再听一遍。${C_OFF}"
+  rule
+
+  # 回答完要重跑这一轮，所以把「跑过了」的标记清掉
+  state_set ran_听懂 no
+  cmd_go
+}
+
+# 单独用：不开项目，只把一段话拆一遍，结果打在屏幕上。
+#
+# 为什么要有这个：用户要的是一个「基础的分析语言智能体」，
+# 那它就该能脱离九步流程单独调用——不是只能在开项目的时候用一次。
+cmd_listen_once() {
+  local text="${1:-}"
+  [ -n "$text" ] || die '用法：./loop.sh 听 "你想说的一段话"'
+  have_claude || die "这台机器上没装 claude，跑不了。"
+
+  local tmp="$STATE_DIR/听一次.md"
+  mkdir -p "$STATE_DIR"
+  {
+    cat "$CMD_DIR/听懂.md"
+    printf '\n\n---- 这次要听的话（不写文件，直接把结果说给我听）----\n'
+    printf '%s\n' "$text"
+    printf '\n注意：这次【不要】写任何文件，直接把上面那个结构打出来给我看。\n'
+  } > "$tmp"
+
+  title "拆一段话"
+  rule
+  claude_run "$tmp"
 }
 
 cmd_status() {
@@ -1556,6 +1661,8 @@ cmd_help() {
 自动化流水线 —— 从一个模糊想法，到一个能用的东西
 
   ./loop.sh start "你想做什么"   开始（一句话说清就行，不用想得多完整）
+  ./loop.sh 答 "1A 2C ..."       回答第0步问你的那几个问题
+  ./loop.sh 听 "任何一段话"       单独用：只把一段话拆开听懂，不开项目
   ./loop.sh go                   继续往下跑
   ./loop.sh status               看进度（终端）
   ./loop.sh 看板                 生成桌面看板：组织图＋群聊＋台账＋账单，双击就开
@@ -1591,7 +1698,8 @@ cmd_help() {
   ./loop.sh close                结项：封存 + 写一份诚实的复盘
   ./loop.sh reset                全部清空重来（先自动备份）
 
-九步流程：
+流程：
+  0 听懂   把你那段话拆开：哪句承重、真痛点是什么 ← 你回答几个选择题
   1 目标   把一句话想法变成能落地的目标
   2 巨人   把前人做到最好的全扒出来、找现成轮子、挖信息差
   3 独特   共性守什么、独特赌什么      ← 你拍板
@@ -1617,6 +1725,8 @@ main() {
   local sub="${1:-help}"; shift || true
   case "$sub" in
     start)   cmd_start "${1:-}" ;;
+    answer|答|回答) cmd_answer "${1:-}" ;;
+    listen|听) cmd_listen_once "${1:-}" ;;
     go|next|continue) cmd_go ;;
     status|st) cmd_status ;;
     ceo|操盘) cmd_ceo ;;
