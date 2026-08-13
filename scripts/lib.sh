@@ -162,6 +162,44 @@ listen_questions() {
     "$LISTEN_FILE" 2>/dev/null
 }
 
+# ---------- 一次只问一个 ----------
+#
+# 这一条是产品定义，不是界面细节：
+# **用户的全部工作量 = 回答一个问题，或者做一个选择题。**
+#
+# 一次甩三个问题给他，那不是"回答一个问题"，那是一张表格——
+# 表格会让人想"我得先都想清楚再答"，于是他就不答了。
+#
+# 而且顺序本身有信息：第一题答完，第二题可能就不用问了。
+# 所以这里【一次只显示一个】，答完再给下一个。
+#
+# 但不是每答一个就重跑一轮 AI——那样三个问题要花三次钱。
+# 同一轮里的问题在本地一个个走完，全答完了才回去让它重新听一遍。
+listen_q_count() {
+  listen_questions | grep -cE '^###[[:space:]]*问题' 2>/dev/null || echo 0
+}
+
+listen_q_nth() {
+  listen_questions | awk -v want="$1" '
+    /^###[[:space:]]*问题/ { i++; if (i == want) { on = 1 } else if (on) { exit } }
+    on { print }
+  '
+}
+
+# 答题进度记成「轮次:已答几个」，换轮自动归零——
+# 不带轮次的话，第二轮会以为你已经答过了，直接跳过所有问题。
+LISTEN_PROGRESS="$STATE_DIR/答题进度"
+listen_answered() {
+  local raw r
+  raw="$(cat "$LISTEN_PROGRESS" 2>/dev/null || echo)"
+  r="${raw%%:*}"
+  [ "$r" = "$(listen_round)" ] && echo "${raw##*:}" || echo 0
+}
+listen_answered_set() {
+  mkdir -p "$STATE_DIR"
+  printf '%s:%s' "$(listen_round)" "$1" > "$LISTEN_PROGRESS"
+}
+
 # 任务清单的路径，多处用到，集中在这里
 TASKS_FILE="$DOC_DIR/07-任务清单.md"
 

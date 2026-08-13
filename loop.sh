@@ -417,24 +417,32 @@ listen_gate() {
   if [ "$round" -ge "$maxr" ]; then
     title "问了 $round 轮，还是没聊拢"
     say "${C_DIM}这通常不是问题问得不对，是这个想法本身还没成形。它在文件末尾给了你三条路。${C_OFF}"
-  else
-    title "它有几个问题要问你 —— 这些它不许替你猜"
+    say ""
+    printf '%s\n' "$(listen_questions)"
+    rule
+    return 0
   fi
+
+  # 一次只给一个。剩下的等这个答完再说。
+  local total done_n idx
+  total="$(listen_q_count)"; done_n="$(listen_answered)"; idx=$((done_n + 1))
+
+  if [ "$total" -eq 0 ]; then
+    title "它还没听懂，但也没问出问题来"
+    say "${C_DIM}看看它写了什么：${LISTEN_FILE#"$ROOT/"}${C_OFF}"
+    say "想推它一把：${C_BOLD}./loop.sh 答 \"你想补充的话\"${C_OFF}"
+    rule
+    return 0
+  fi
+
+  title "有一件事它不许替你猜"
+  [ "$total" -gt 1 ] && say "${C_DIM}第 $idx 个，共 $total 个。答完这个再给下一个——一次只想一件事就行。${C_OFF}"
   say ""
-  local qs; qs="$(listen_questions)"
-  if [ -n "$qs" ]; then
-    printf '%s\n' "$qs"
-  else
-    say "  ${C_DIM}（问题在 ${LISTEN_FILE#"$ROOT/"} 的第四节）${C_OFF}"
-  fi
+  printf '%s\n' "$(listen_q_nth "$idx")"
   rule
-  say "全文在：${C_BOLD}${LISTEN_FILE#"$ROOT/"}${C_OFF}　${C_DIM}（第 $round 轮，最多 $maxr 轮）${C_OFF}"
+  say "怎么答：${C_BOLD}./loop.sh 答 \"A\"${C_OFF}　${C_DIM}或者写句话，怎么顺手怎么来${C_OFF}"
   say ""
-  say "怎么回答，两条路随便挑："
-  say "  ${C_BOLD}./loop.sh 答 \"1A 2C 3 我其实更在意的是…\"${C_OFF}"
-  say "  ${C_DIM}或者直接打开那个文件，在末尾想写什么写什么，写完跑 ./loop.sh go${C_OFF}"
-  say ""
-  say "${C_DIM}答不上来也可以直说「这个我答不上来」——那本身就是有用的信息。${C_OFF}"
+  say "${C_DIM}答不上来就直说「这个我答不上来」——那本身就是有用的信息，不是不合格的回答。${C_OFF}"
   rule
 }
 
@@ -444,17 +452,40 @@ cmd_answer() {
   [ -n "$text" ] || die '用法：./loop.sh 答 "1A 2C 3 我其实更在意的是…"'
   [ -f "$LISTEN_FILE" ] || die "还没有要回答的东西。先跑 ./loop.sh start \"你的想法\""
 
-  local round; round="$(listen_round)"
+  local round total done_n idx
+  round="$(listen_round)"; total="$(listen_q_count)"
+  done_n="$(listen_answered)"; idx=$((done_n + 1))
+
+  # 把回答记在它对应的那个问题下面，不然回头看不出你答的是哪一题
   {
-    printf '\n## 你的回答（第 %s 轮问的）\n\n' "$round"
+    if [ "$total" -gt 0 ] && [ "$idx" -le "$total" ]; then
+      printf '\n## 你的回答 · 第 %s 轮 · 问题 %s\n\n' "$round" "$idx"
+    else
+      printf '\n## 你的回答（第 %s 轮）\n\n' "$round"
+    fi
     printf '%s\n' "$text"
   } >> "$LISTEN_FILE"
+  listen_answered_set "$idx"
   ok "记下了。"
-  say "${C_DIM}接着让它再听一遍。${C_OFF}"
-  rule
 
-  # 回答完要重跑这一轮，所以把「跑过了」的标记清掉
-  state_set ran_听懂 no
+  # 同一轮里还有没答的，就在本地接着问下一个——【不重跑 AI】。
+  #
+  # 为什么：三个问题重跑三次，就是花三次钱换同一件事。
+  # 问题都是这一轮一起生成的，答完再一起送回去，让它重新听一遍就够了。
+  if [ "$total" -gt 0 ] && [ "$idx" -lt "$total" ]; then
+    rule
+    title "记下了。下一个 —— 第 $((idx+1)) 个，共 $total 个"
+    say ""
+    printf '%s\n' "$(listen_q_nth "$((idx+1))")"
+    rule
+    say "怎么答：${C_BOLD}./loop.sh 答 \"A\"${C_OFF}"
+    rule
+    return 0
+  fi
+
+  say "${C_DIM}都答完了，让它再听一遍。${C_OFF}"
+  rule
+  state_set ran_听懂 no      # 这一轮要重跑，清掉「跑过了」的标记
   cmd_go
 }
 

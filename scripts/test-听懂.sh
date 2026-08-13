@@ -154,6 +154,73 @@ printf '%s' "$out" | grep -q "问题 1" \
   && pass "它把问题直接打在屏幕上（不用你翻文件）" \
   || fail "问题没打出来，人得自己去翻文件找"
 
+# ---------- 三之二、一次只问一个 ----------
+#
+# 产品定义：用户的全部工作量 = 回答一个问题，或者做一个选择题。
+# 一次甩三个给他，那不是"回答一个问题"，那是一张表格——
+# 表格会让人觉得"我得先都想清楚再答"，于是他就不答了。
+S3="$TMP/sandbox3"
+cp -r "$SANDBOX" "$S3"; rm -rf "$S3/.loop" "$S3/docs"
+export FAKE_WRITE="$S3/docs/00-听到的.md"
+export FAKE_BODY='原话：「随便说点什么」
+
+轮次：第 1 轮   状态：还没听懂
+
+## 四、我不许替你猜的
+
+### 问题 1：第一个问题问的是甲
+- **A** 甲选项A
+- **B** 甲选项B
+
+### 问题 2：第二个问题问的是乙
+- **A** 乙选项A
+
+### 问题 3：第三个问题问的是丙
+- **A** 丙选项A
+
+## 五、我可能听错的地方
+1. 也许'
+( cd "$S3" && ./loop.sh start "随便说点什么" >/dev/null 2>&1 )
+out="$( cd "$S3" && ./loop.sh go 2>&1 )"
+
+if printf '%s' "$out" | grep -q "问的是甲" \
+   && ! printf '%s' "$out" | grep -q "问的是乙" \
+   && ! printf '%s' "$out" | grep -q "问的是丙"; then
+  pass "一次只显示一个问题（不是甩一张表格给他）"
+else
+  fail "一次把好几个问题都甩出来了"
+fi
+printf '%s' "$out" | grep -q "第 1 个，共 3 个" \
+  && pass "告诉他一共几个、现在第几个（心里有底）" || fail "没说清一共几个"
+
+# 答第一个：应该【本地】给出第二个，不许再花钱跑 AI
+export FAKE_WRITE=""            # 这一步要是调了 AI，文档就会被改；不改说明没调
+calls_before=$(ls "$S3/.loop/log" 2>/dev/null | wc -l)
+out2="$( cd "$S3" && ./loop.sh 答 "A" 2>&1 )"
+calls_after=$(ls "$S3/.loop/log" 2>/dev/null | wc -l)
+
+printf '%s' "$out2" | grep -q "问的是乙" \
+  && pass "答完第一个，本地直接给出第二个" || fail "答完第一个没接上第二个"
+[ "$calls_after" -eq "$calls_before" ] \
+  && pass "问第二个【没有再花钱跑 AI】（同一轮的问题在本地走完）" \
+  || fail "每答一个就重跑一次 AI —— 三个问题要花三次钱"
+
+# 答到最后一个，才该回去让它重新听
+out3="$( cd "$S3" && ./loop.sh 答 "A" 2>&1 )"
+printf '%s' "$out3" | grep -q "问的是丙" \
+  && pass "接着给第三个" || fail "第三个没给出来"
+out4="$( cd "$S3" && ./loop.sh 答 "A" 2>&1 )"
+printf '%s' "$out4" | grep -q "都答完了" \
+  && pass "全答完了才回去让它重新听一遍" || fail "答完最后一个没有触发重听"
+
+# 三个回答都要各自记在对应的题号下
+doc3="$(cat "$S3/docs/00-听到的.md")"
+[ "$(printf '%s' "$doc3" | grep -c '## 你的回答 · 第 1 轮 · 问题')" -eq 3 ] \
+  && pass "三个回答分别记在各自的题号下（回头看得出答的是哪题）" \
+  || fail "回答没有按题号分开记"
+
+export FAKE_WRITE="$SANDBOX/docs/00-听到的.md"
+
 # ---------- 四、答一句，轮次要往前走 ----------
 ( cd "$SANDBOX" && FAKE_WRITE="" ./loop.sh 答 "1A，其实我最烦的是老忘了谁该回访" >/dev/null 2>&1 )
 listen_doc | grep -q "老忘了谁该回访" \
