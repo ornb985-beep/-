@@ -15,7 +15,7 @@ import glob
 import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-# 九步的清单只有一份真身，在 状态.py 里（它又对着 lib.sh 有防漂移测试）。
+# 十步的清单只有一份真身，在 状态.py 里（它又对着 lib.sh 有防漂移测试）。
 # 这儿曾经自己抄了一份，加「第0步 听懂」的时候就漏了——
 # 结果是看板上的进度条比实际少一格，而且看不出来是错的。
 from 状态 import STAGES  # noqa: E402

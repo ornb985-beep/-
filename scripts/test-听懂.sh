@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# 第0步「听懂」的自测。不花钱、不联网。
+# 第1步「听懂」的自测。不花钱、不联网。
 #
 # 这一步跟别的步不一样，它是【引导式】的：可能问你好几轮，你答完它再听一遍。
 # 所以最坏的失败方式不是报错，是两种"看起来对"：
 #   ① 它其实没听懂，却往下走了 → 后面八步全建立在一个误解上
-#   ② 它一直说没听懂，问个没完 → 你被困在第0步
+#   ② 它一直说没听懂，问个没完 → 你被困在第1步
 # 这里两头都测。
 #
-# 还有一件事必须守住：九步的清单被抄了三份（lib.sh / 状态.py / 看板.py）。
+# 还有一件事必须守住：十步的清单被抄了三份（lib.sh / 状态.py / 看板.py）。
 # 抄的东西会漂。漂了的话界面上的进度、拍板闸门、文档名全是错的，
 # 而且【看不出来是错的】。第一节就是逐项对着比。
 
@@ -23,7 +23,7 @@ check() {
 }
 
 echo
-echo "=== 第0步「听懂」自测 ==="
+echo "=== 第1步「听懂」自测 ==="
 
 # ---------- 一、三份拷贝不许漂 ----------
 drift="$(python3 - "$REPO" <<'PY'
@@ -69,9 +69,31 @@ print("\n".join(bad))
 PY
 )"
 if [ -z "$drift" ]; then
-  pass "九步清单三处一致（lib.sh / 状态.py / 看板.py）"
+  pass "十步清单三处一致（lib.sh / 状态.py / 看板.py）"
 else
-  fail "九步清单漂了"; printf '%s\n' "$drift" | sed 's/^/         /'
+  fail "十步清单漂了"; printf '%s\n' "$drift" | sed 's/^/         /'
+fi
+
+# 每份说明书开头写的「第N步」，得跟它在流程里的真实位置一样。
+#
+# 为什么单测这条：references/框架库.md 里「第4步『要做什么』」这个错，
+# 挂了很久没人发现——因为没有任何人、任何东西会去核对编号。
+# 插一个新步骤就会让所有编号错位一格，而且错了完全看不出来。
+badnum=""
+for st in $(bash -c '. "$1/scripts/lib.sh"; printf "%s\n" "${STAGES[@]}"' _ "$REPO"); do
+  [ "$st" = "done" ] && continue
+  f="$REPO/.claude/commands/$st.md"
+  [ -f "$f" ] || { badnum="$badnum
+  $st 没有说明书文件"; continue; }
+  want="$(bash -c '. "$1/scripts/lib.sh"; stage_num "$2"' _ "$REPO" "$st")"
+  got="$(grep -m1 -oE '^description: 第[0-9]+步' "$f" | grep -oE '[0-9]+' || true)"
+  [ "$want" = "$got" ] || badnum="$badnum
+  $st.md 写着第${got:-?}步，实际是第${want}步"
+done
+if [ -z "$badnum" ]; then
+  pass "十份说明书开头的「第N步」都对得上真实位置"
+else
+  fail "说明书的步骤编号对不上"; printf '%s\n' "$badnum"
 fi
 
 # ---------- 搭个沙盘，用假的 claude ----------
@@ -102,7 +124,7 @@ export FAKE_WRITE="$SANDBOX/docs/00-听到的.md"
 listen_doc() { cat "$SANDBOX/docs/00-听到的.md" 2>/dev/null; }
 stage_now()  { cat "$SANDBOX/.loop/stage" 2>/dev/null; }
 
-# ---------- 二、start 之后应该停在第0步 ----------
+# ---------- 二、start 之后应该停在第1步 ----------
 export FAKE_BODY='# 00 · 我听到的
 
 原话：「我想做个帮我记客户跟进的小工具」
@@ -119,13 +141,13 @@ export FAKE_BODY='# 00 · 我听到的
 ## 五、我可能听错的地方
 1. 也许你要的不是记录，是提醒'
 ( cd "$SANDBOX" && ./loop.sh start "我想做个帮我记客户跟进的小工具" >/dev/null 2>&1 )
-check "start 之后停在第0步「听懂」" "听懂" "$(stage_now)"
+check "start 之后停在第1步「听懂」" "听懂" "$(stage_now)"
 [ -f "$SANDBOX/docs/00-听到的.md" ] \
   && pass "产出了 docs/00-听到的.md" || fail "没产出 docs/00-听到的.md"
 
 # ---------- 三、还没听懂就不许往下走 ----------
 ( cd "$SANDBOX" && ./loop.sh go >/dev/null 2>&1 )
-check "「还没听懂」时，go 不会溜到第1步" "听懂" "$(stage_now)"
+check "「还没听懂」时，go 不会溜到第2步" "听懂" "$(stage_now)"
 
 out="$( cd "$SANDBOX" && ./loop.sh go 2>&1 )"
 printf '%s' "$out" | grep -q "问题 1" \
@@ -157,7 +179,7 @@ check "「听懂了」之后停在拍板闸门，还没往下" "听懂" "$(stage
 
 export FAKE_WRITE=""                                  # 别再改文档
 ( cd "$SANDBOX" && ./loop.sh go >/dev/null 2>&1 )     # 这一次 go = 你点头
-check "你点头之后才进第1步" "goal" "$(stage_now)"
+check "你点头之后才进第2步" "goal" "$(stage_now)"
 
 # ---------- 六、轮数到顶要停，不许问个没完 ----------
 S2="$TMP/sandbox2"
@@ -173,5 +195,5 @@ printf '%s' "$out" | grep -q "还是没聊拢" \
   || fail "到了轮数上限还在若无其事地接着问"
 
 echo
-if [ "$FAILED" = 0 ]; then echo "第0步自测：全部通过"; else echo "第0步自测：有失败项"; fi
+if [ "$FAILED" = 0 ]; then echo "第1步自测：全部通过"; else echo "第1步自测：有失败项"; fi
 exit "$FAILED"

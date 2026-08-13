@@ -171,7 +171,7 @@ def read_all(root):
         rows = [r for r in m.group(1).splitlines() if r.strip().startswith("|")]
         rev = len([r for r in rows[2:] if re.sub(r"[|\s\-]", "", r)])
 
-    # ---------- 九步 ----------
+    # ---------- 十步 ----------
     steps = []
     for i, (k, label) in enumerate(STAGES):
         doc = STAGE_DOC.get(k, "")
