@@ -1,0 +1,4 @@
+{
+  "name": "MoneyLoop · 商业操盘手",
+  "install": "set -e; python3 --version; command -v python >/dev/null 2>&1 || sudo ln -sf \"$(command -v python3)\" /usr/local/bin/python || true; if [ -f requirements.txt ]; then python3 -m pip install -r requirements.txt; fi; python3 -m compileall -q . || true"
+}
