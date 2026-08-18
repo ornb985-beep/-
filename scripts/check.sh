@@ -194,6 +194,12 @@ if [ -f scripts/test-数字漂移.sh ]; then
   run "数字漂移（文档命令数 vs loop.sh 实数）" bash scripts/test-数字漂移.sh
 fi
 
+# 对分歧：把两次「听懂」产出的差异数出来（漏判/判级差异/标记计数）。
+# 这工具是核心一「分歧要被量出来」的第一块，它自己坏了还绿着，分歧就又变回手感。
+if [ -f scripts/test-对分歧.sh ]; then
+  run "对分歧（漏判/判级差异/标记,数出来不许靠手感）" bash scripts/test-对分歧.sh
+fi
+
 # ---------------- 已知失败区（撞到的真 bug，先记录、不修） ----------------
 if [ -d scripts/known-fail ]; then
   for kf in scripts/known-fail/test-*.sh; do
