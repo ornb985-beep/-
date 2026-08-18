@@ -2486,7 +2486,7 @@ main() {
     ledger|台账) cmd_board ;;
     launch|上线) cmd_launch ;;
     stoploss|止损) cmd_stoploss "${1:-}" ;;
-    ledger|记账) cmd_ledger "${1:-}" "${2:-}" "${3:-}" ;;
+    account|记账) cmd_ledger "${1:-}" "${2:-}" "${3:-}" ;;
     report|日报) cmd_daily_report ;;
     enlighten|启蒙) cmd_enlighten ;;
     aesthetic|审美) cmd_aesthetic ;;
