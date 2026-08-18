@@ -1,5 +1,6 @@
-═══ MoneyLoop 交接包 2/3 · 主程序和测试（这是你要动的代码） ═══
+═══ MoneyLoop 交接包 2/3 · 能跑的代码（bash 为主，python 只管看板） ═══
 （每个文件以「▼▼▼ FILE: 路径 ▼▼▼」开头，按这行切分）
+（生成命令：bash scripts/打包交接.sh —— 别手改这个文件，改源文件后重跑）
 
 
 ▼▼▼ FILE: loop.sh ▼▼▼
@@ -2522,7 +2523,6 @@ main() {
 }
 main "$@"
 
-
 ▼▼▼ FILE: scripts/lib.sh ▼▼▼
 #!/usr/bin/env bash
 # 公共函数库。被 loop.sh 和其他脚本 source，不单独执行。
@@ -3386,7 +3386,6 @@ HUMAN_GATE_RE='【需要你回答】|【停下来给我看】'
 task_is_human_gated() { printf '%s' "$1" | grep -qE "$HUMAN_GATE_RE"; }
 tasks_human_gated()   { _count "^[[:space:]]*- \[ \] .*(${HUMAN_GATE_RE})"; }
 
-
 ▼▼▼ FILE: scripts/check.sh ▼▼▼
 #!/usr/bin/env bash
 # 「这东西还能正常跑吗」检查器。
@@ -3425,6 +3424,22 @@ has() { command -v "$1" >/dev/null 2>&1; }
 # 不记的话就会出现最坏的情况：什么都没验，屏幕上却写着"全部通过"。
 SKIPPED=()
 skip() { SKIPPED+=("$1"); }
+
+# 「已知失败」：写测试时撞出的真 bug——测试照写、照跑，但先不修（先修哪个由人定）。
+# 这类失败【不算进通过判定】，但必须在末尾单独报出来，绝不许当没看见、更不许改绿。
+KNOWN_FAIL=0
+KNOWN_FAIL_NAMES=()
+run_known() {
+  local label="$1"; shift
+  printf '\n=== [已知失败区] %s ===\n' "$label"
+  printf '$ %s\n' "$*"
+  if "$@"; then
+    printf '[意外通过] %s —— 这条已知 bug 可能被修好了，回去确认再从已知失败区挪出来\n' "$label"
+  else
+    printf '[已知失败] %s（真 bug，已记录，暂不计入通过判定）\n' "$label"
+    KNOWN_FAIL=$((KNOWN_FAIL+1)); KNOWN_FAIL_NAMES+=("$label")
+  fi
+}
 
 # ---------------- Python ----------------
 # 找 .py 要往下翻子目录。只看根目录的话，代码放在 src/ 里就完全看不见——
@@ -3552,6 +3567,30 @@ if [ -f scripts/test-蓝图.sh ]; then
   run "蓝图收敛循环（改到你说就是它了）" bash scripts/test-蓝图.sh
 fi
 
+# 记账：钱的静默失败——屏幕说"记下了"，账本.tsv 却没落。日报和看板都读它。
+if [ -f scripts/test-记账.sh ]; then
+  run "记账（账本.tsv 真的落盘了）" bash scripts/test-记账.sh
+fi
+
+# 止损：止损线写丢了 = 永远不会喊停。这套系统存在的头号意义就在这条上。
+if [ -f scripts/test-止损.sh ]; then
+  run "止损（止损线真的写进去了）" bash scripts/test-止损.sh
+fi
+
+# 数字漂移：文档里写死的命令数是断言，必须和 loop.sh 实数一致。
+# 断言性数字漂了不该靠"谁记得"，该被一条测试守住。
+if [ -f scripts/test-数字漂移.sh ]; then
+  run "数字漂移（文档命令数 vs loop.sh 实数）" bash scripts/test-数字漂移.sh
+fi
+
+# ---------------- 已知失败区（撞到的真 bug，先记录、不修） ----------------
+if [ -d scripts/known-fail ]; then
+  for kf in scripts/known-fail/test-*.sh; do
+    [ -f "$kf" ] || continue
+    run_known "$(basename "$kf")" bash "$kf"
+  done
+fi
+
 # ---------------- 项目自定义检查 ----------------
 if [ -f check.local.sh ]; then
   run "项目自定义检查" bash check.local.sh
@@ -3560,27 +3599,47 @@ fi
 # ---------------- 汇总 ----------------
 printf '\n────────────────────────────\n'
 
-# 先说没检查成的。「全部通过」如果底下压着一堆没跑的检查，
+# 先说没验成的。「全部通过」如果底下压着一堆没跑的检查，
 # 那是最坏的一种假象——比直接失败还危险，因为你会以为它验过了。
-if [ "${#SKIPPED[@]}" -gt 0 ]; then
-  printf '注意，下面这些本来该检查、但没检查成：\n'
+# 所以现在：只要有"没验成"的，末行就不许写"全部通过"，而且 exit 非 0。
+# 跳过不等于通过——这就是第 6 条。（缺 pytest、有 .py 却没测试，都算没验。）
+NOTV="${#SKIPPED[@]}"
+if [ "$NOTV" -gt 0 ]; then
+  printf '有 %s 项【没验成】（跳过不等于通过，见第 6 条）：\n' "$NOTV"
   for s in "${SKIPPED[@]}"; do printf '  · %s\n' "$s"; done
   printf '\n'
 fi
 
-if [ "$RAN" -eq 0 ]; then
+# 已知失败单独报，绝不混进"通过/没通过"里，也绝不许当没看见。
+if [ "$KNOWN_FAIL" -gt 0 ]; then
+  printf '已知失败 %s 条（真 bug，已记录、先不修，不计入通过判定）：\n' "$KNOWN_FAIL"
+  for n in "${KNOWN_FAIL_NAMES[@]}"; do printf '  · %s\n' "$n"; done
+  printf '\n'
+fi
+
+if [ "$RAN" -eq 0 ] && [ "$NOTV" -eq 0 ]; then
   printf '还没有任何可跑的检查（项目里还没有测试）。\n'
   printf '这不算失败，但等有代码了就该补测试了——没有测试，自动循环就没法判断做对没有。\n'
   exit 0
 fi
-if [ "$FAILED" -eq 0 ]; then
-  printf '全部通过（共 %s 项检查）\n' "$RAN"
-  exit 0
-else
-  printf '有检查没通过（共 %s 项）。上面标着 [失败] 的就是。\n' "$RAN"
+
+if [ "$FAILED" -ne 0 ]; then
+  printf '有检查没通过（跑了 %s 项，上面标着 [失败] 的就是）。\n' "$RAN"
+  [ "$KNOWN_FAIL" -gt 0 ] && printf '（另有已知失败 %s 条，见上。）\n' "$KNOWN_FAIL"
   exit 1
 fi
 
+if [ "$NOTV" -gt 0 ]; then
+  # 有没验成的：跑过的都过了，但没验成的那几项没绿，就不算全绿。
+  printf '有 %s 项没验（见上）——跑过的 %s 项都过了，但没验成的不算通过。\n' "$NOTV" "$RAN"
+  [ "$KNOWN_FAIL" -gt 0 ] && printf '（另有已知失败 %s 条。）\n' "$KNOWN_FAIL"
+  exit 1
+fi
+
+printf '全部通过（共 %s 项检查）' "$RAN"
+[ "$KNOWN_FAIL" -gt 0 ] && printf '；另有已知失败 %s 条（真 bug，已记录）' "$KNOWN_FAIL"
+printf '\n'
+exit 0
 
 ▼▼▼ FILE: scripts/状态.py ▼▼▼
 #!/usr/bin/env python3
@@ -3818,7 +3877,6 @@ def doc_text(root, name):
         if p.startswith(os.path.join(base, sub) + os.sep) and os.path.isfile(p):
             return rd(p)
     return ""
-
 
 ▼▼▼ FILE: scripts/看板.py ▼▼▼
 #!/usr/bin/env python3
@@ -4145,139 +4203,6 @@ with open(out, "w", encoding="utf-8") as f:
     f.write(HTML)
 print(out)
 
-
-▼▼▼ FILE: scripts/test-接口.sh ▼▼▼
-#!/usr/bin/env bash
-# 「每个员工是不是真的一个独立接口」自测。
-#
-# 为什么必须有这个测试：
-# 换接口这件事，最坏的失败方式不是报错，是【看起来换了但其实没换】——
-# 你以为客服在用便宜的 DeepSeek，实际上他一直在烧官方的钱，
-# 而账单里那个数字还是按官方价目表算的，你完全看不出来。
-#
-# 所以这里不测"命令跑没跑成功"，测的是：
-#   调用这个员工的时候，claude 这个程序【真正收到的环境变量】是什么。
-# 办法是用一个假的 claude，让它把自己收到的环境倒出来。
-#
-# 不花钱、不联网、几秒钟跑完。
-
-set -uo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-FAILED=0
-pass() { printf '  [通过] %s\n' "$1"; }
-fail() { printf '  [失败] %s\n' "$1"; FAILED=1; }
-check() { # check <说明> <期望> <实际>
-  if [ "$2" = "$3" ]; then pass "$1"
-  else fail "$1"; printf '         期望：%s\n         实际：%s\n' "$2" "$3"; fi
-}
-
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
-
-# ---- 一个假的 claude：不联网，只把自己收到的环境倒进文件 ----
-mkdir -p "$TMP/bin"
-cat > "$TMP/bin/claude" <<'FAKE'
-#!/usr/bin/env bash
-cat > /dev/null            # 提示词从 stdin 进来，丢掉
-{
-  echo "BASE_URL=${ANTHROPIC_BASE_URL:-}"
-  echo "MODEL=${ANTHROPIC_MODEL:-}"
-  echo "TOKEN=${ANTHROPIC_AUTH_TOKEN:-}"
-  echo "APIKEY=${ANTHROPIC_API_KEY:-}"
-  echo "PROVIDER=${LOOP_PROVIDER:-}"
-  echo "ARGS=$*"
-} >> "$FAKE_CLAUDE_DUMP"
-# 装成 --output-format json 的正常返回
-echo '{"result":"假的回答","total_cost_usd":0.01,"duration_ms":1000}'
-FAKE
-chmod +x "$TMP/bin/claude"
-
-# ---- 一个干净的沙盘，别碰用户真实的 .loop ----
-export ROOT="$TMP/sandbox"
-mkdir -p "$ROOT/docs"
-cp -r "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/roles-模板" "$ROOT/" 2>/dev/null || true
-# shellcheck disable=SC1091
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
-
-export CLAUDE_BIN="$TMP/bin/claude"
-export FAKE_CLAUDE_DUMP="$TMP/dump.txt"
-
-mkdir -p "$ROLE_DIR"
-printf '层：执行\n一句话：管客服的\n\n你是客服。\n'   > "$(role_file 客服)"
-printf '层：参谋\n一句话：管战略的\n\n你是战略。\n'   > "$(role_file 战略)"
-printf '层：执行\n一句话：管内容的\n模型：sonnet\n\n你是内容。\n' > "$(role_file 内容)"
-
-echo
-echo "=== 接口隔离自测 ==="
-
-# ---------- 1. 默认全走官方 ----------
-check "没配接口时，认定是官方" "官方" "$(role_provider 客服)"
-
-# ---------- 2. 切一个人，只有他变 ----------
-provider_save_key deepseek "sk-假钥匙-测试用"
-provider_apply 客服 deepseek
-check "切过的人认得出是 deepseek" "deepseek" "$(role_provider 客服)"
-check "没切的人还是官方"          "官方"     "$(role_provider 战略)"
-
-# ---------- 3. 真调用一次，看 claude 到底收到什么 ----------
-: > "$FAKE_CLAUDE_DUMP"
-NO_GROUP_CHAT=1 ROLE_ISOLATED=1 ask_role 客服 "随便问一句" >/dev/null 2>&1
-got_url="$(grep -m1 '^BASE_URL=' "$FAKE_CLAUDE_DUMP" | cut -d= -f2-)"
-got_mdl="$(grep -m1 '^MODEL='    "$FAKE_CLAUDE_DUMP" | cut -d= -f2-)"
-got_tok="$(grep -m1 '^TOKEN='    "$FAKE_CLAUDE_DUMP" | cut -d= -f2-)"
-got_key="$(grep -m1 '^APIKEY='   "$FAKE_CLAUDE_DUMP" | cut -d= -f2-)"
-check "客服 真的连到 DeepSeek"     "https://api.deepseek.com/anthropic" "$got_url"
-check "客服 真的用 v4-pro"         "deepseek-v4-pro"                    "$got_mdl"
-check "客服 真的用那把新钥匙"       "sk-假钥匙-测试用"                    "$got_tok"
-check "官方 key 被清掉了（不打架）" ""                                   "$got_key"
-
-# ---------- 4. 同一秒问另一个人，他不该被污染 ----------
-: > "$FAKE_CLAUDE_DUMP"
-NO_GROUP_CHAT=1 ROLE_ISOLATED=1 ask_role 战略 "随便问一句" >/dev/null 2>&1
-got_url2="$(grep -m1 '^BASE_URL=' "$FAKE_CLAUDE_DUMP" | cut -d= -f2-)"
-got_tok2="$(grep -m1 '^TOKEN='    "$FAKE_CLAUDE_DUMP" | cut -d= -f2-)"
-# 注意这里不能断言"地址是空的"——机器上本来可能就设了官方地址，
-# 那是正常的、该继承的。要断言的是：他【没有】拿到 DeepSeek 那个地址。
-case "$got_url2" in
-  *deepseek*) fail "战略 被 DeepSeek 污染了（地址=$got_url2）" ;;
-  *) pass "战略 没被 DeepSeek 污染（地址=${got_url2:-默认})" ;;
-esac
-check "战略 没拿到别人的钥匙" "" "$got_tok2"
-
-# ---------- 5. 出事时要能说清为什么（LAST_LOG 必须活着穿过子 shell） ----------
-# 这条测的是一个真栽过的坑：接了别家接口的角色，claude_run 在子 shell 里跑，
-# 子 shell 里的赋值出不来，于是"没通"报得出来、"为什么没通"整段空白。
-[ -n "${LAST_LOG:-}" ] && [ -f "$LAST_LOG" ] \
-  && pass "换过接口的员工，出事时还能拿到日志（LAST_LOG 活着）" \
-  || fail "换过接口的员工的日志路径丢了——出事只会说'没通'，说不出为什么"
-
-# ---------- 6. 台账必须标出这笔走的谁家 ----------
-last_provider="$(tail -1 "$COST_LOG" 2>/dev/null | awk -F'\t' '{print $5}')"
-check "账单标了走的谁家接口" "官方" "$last_provider"
-
-# ---------- 7. 接口指定了模型，就不许再传角色定义里的「模型：」 ----------
-# 拿别家的接口点一道人家菜单上没有的菜，只会调不通。
-provider_apply 内容 deepseek
-: > "$FAKE_CLAUDE_DUMP"
-NO_GROUP_CHAT=1 ROLE_ISOLATED=1 ask_role 内容 "随便问一句" >/dev/null 2>&1
-if grep -q '^ARGS=.*--model sonnet' "$FAKE_CLAUDE_DUMP"; then
-  fail "接口已指定模型，却还把角色定义里的「模型：sonnet」传过去了"
-else
-  pass "接口指定了模型时，不再传角色定义里的「模型：」"
-fi
-
-# ---------- 8. 换回官方要换得干净 ----------
-provider_apply 客服 官方
-check "换回官方后认定为官方" "官方" "$(role_provider 客服)"
-[ -f "$(role_env 客服)" ] && fail "换回官方了，接口文件却还在" \
-  || pass "换回官方后，接口文件清干净了"
-
-echo
-if [ "$FAILED" = 0 ]; then echo "接口隔离自测：全部通过"; else echo "接口隔离自测：有失败项"; fi
-exit "$FAILED"
-
-
 ▼▼▼ FILE: scripts/test-听懂.sh ▼▼▼
 #!/usr/bin/env bash
 # 第1步「听懂」的自测。不花钱、不联网。
@@ -4546,6 +4471,463 @@ echo
 if [ "$FAILED" = 0 ]; then echo "第1步自测：全部通过"; else echo "第1步自测：有失败项"; fi
 exit "$FAILED"
 
+▼▼▼ FILE: scripts/test-接口.sh ▼▼▼
+#!/usr/bin/env bash
+# 「每个员工是不是真的一个独立接口」自测。
+#
+# 为什么必须有这个测试：
+# 换接口这件事，最坏的失败方式不是报错，是【看起来换了但其实没换】——
+# 你以为客服在用便宜的 DeepSeek，实际上他一直在烧官方的钱，
+# 而账单里那个数字还是按官方价目表算的，你完全看不出来。
+#
+# 所以这里不测"命令跑没跑成功"，测的是：
+#   调用这个员工的时候，claude 这个程序【真正收到的环境变量】是什么。
+# 办法是用一个假的 claude，让它把自己收到的环境倒出来。
+#
+# 不花钱、不联网、几秒钟跑完。
+
+set -uo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+FAILED=0
+pass() { printf '  [通过] %s\n' "$1"; }
+fail() { printf '  [失败] %s\n' "$1"; FAILED=1; }
+check() { # check <说明> <期望> <实际>
+  if [ "$2" = "$3" ]; then pass "$1"
+  else fail "$1"; printf '         期望：%s\n         实际：%s\n' "$2" "$3"; fi
+}
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+# ---- 一个假的 claude：不联网，只把自己收到的环境倒进文件 ----
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/claude" <<'FAKE'
+#!/usr/bin/env bash
+cat > /dev/null            # 提示词从 stdin 进来，丢掉
+{
+  echo "BASE_URL=${ANTHROPIC_BASE_URL:-}"
+  echo "MODEL=${ANTHROPIC_MODEL:-}"
+  echo "TOKEN=${ANTHROPIC_AUTH_TOKEN:-}"
+  echo "APIKEY=${ANTHROPIC_API_KEY:-}"
+  echo "PROVIDER=${LOOP_PROVIDER:-}"
+  echo "ARGS=$*"
+} >> "$FAKE_CLAUDE_DUMP"
+# 装成 --output-format json 的正常返回
+echo '{"result":"假的回答","total_cost_usd":0.01,"duration_ms":1000}'
+FAKE
+chmod +x "$TMP/bin/claude"
+
+# ---- 一个干净的沙盘，别碰用户真实的 .loop ----
+export ROOT="$TMP/sandbox"
+mkdir -p "$ROOT/docs"
+cp -r "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/roles-模板" "$ROOT/" 2>/dev/null || true
+# shellcheck disable=SC1091
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+
+export CLAUDE_BIN="$TMP/bin/claude"
+export FAKE_CLAUDE_DUMP="$TMP/dump.txt"
+
+mkdir -p "$ROLE_DIR"
+printf '层：执行\n一句话：管客服的\n\n你是客服。\n'   > "$(role_file 客服)"
+printf '层：参谋\n一句话：管战略的\n\n你是战略。\n'   > "$(role_file 战略)"
+printf '层：执行\n一句话：管内容的\n模型：sonnet\n\n你是内容。\n' > "$(role_file 内容)"
+
+echo
+echo "=== 接口隔离自测 ==="
+
+# ---------- 1. 默认全走官方 ----------
+check "没配接口时，认定是官方" "官方" "$(role_provider 客服)"
+
+# ---------- 2. 切一个人，只有他变 ----------
+provider_save_key deepseek "sk-假钥匙-测试用"
+provider_apply 客服 deepseek
+check "切过的人认得出是 deepseek" "deepseek" "$(role_provider 客服)"
+check "没切的人还是官方"          "官方"     "$(role_provider 战略)"
+
+# ---------- 3. 真调用一次，看 claude 到底收到什么 ----------
+: > "$FAKE_CLAUDE_DUMP"
+NO_GROUP_CHAT=1 ROLE_ISOLATED=1 ask_role 客服 "随便问一句" >/dev/null 2>&1
+got_url="$(grep -m1 '^BASE_URL=' "$FAKE_CLAUDE_DUMP" | cut -d= -f2-)"
+got_mdl="$(grep -m1 '^MODEL='    "$FAKE_CLAUDE_DUMP" | cut -d= -f2-)"
+got_tok="$(grep -m1 '^TOKEN='    "$FAKE_CLAUDE_DUMP" | cut -d= -f2-)"
+got_key="$(grep -m1 '^APIKEY='   "$FAKE_CLAUDE_DUMP" | cut -d= -f2-)"
+check "客服 真的连到 DeepSeek"     "https://api.deepseek.com/anthropic" "$got_url"
+check "客服 真的用 v4-pro"         "deepseek-v4-pro"                    "$got_mdl"
+check "客服 真的用那把新钥匙"       "sk-假钥匙-测试用"                    "$got_tok"
+check "官方 key 被清掉了（不打架）" ""                                   "$got_key"
+
+# ---------- 4. 同一秒问另一个人，他不该被污染 ----------
+: > "$FAKE_CLAUDE_DUMP"
+NO_GROUP_CHAT=1 ROLE_ISOLATED=1 ask_role 战略 "随便问一句" >/dev/null 2>&1
+got_url2="$(grep -m1 '^BASE_URL=' "$FAKE_CLAUDE_DUMP" | cut -d= -f2-)"
+got_tok2="$(grep -m1 '^TOKEN='    "$FAKE_CLAUDE_DUMP" | cut -d= -f2-)"
+# 注意这里不能断言"地址是空的"——机器上本来可能就设了官方地址，
+# 那是正常的、该继承的。要断言的是：他【没有】拿到 DeepSeek 那个地址。
+case "$got_url2" in
+  *deepseek*) fail "战略 被 DeepSeek 污染了（地址=$got_url2）" ;;
+  *) pass "战略 没被 DeepSeek 污染（地址=${got_url2:-默认})" ;;
+esac
+check "战略 没拿到别人的钥匙" "" "$got_tok2"
+
+# ---------- 5. 出事时要能说清为什么（LAST_LOG 必须活着穿过子 shell） ----------
+# 这条测的是一个真栽过的坑：接了别家接口的角色，claude_run 在子 shell 里跑，
+# 子 shell 里的赋值出不来，于是"没通"报得出来、"为什么没通"整段空白。
+[ -n "${LAST_LOG:-}" ] && [ -f "$LAST_LOG" ] \
+  && pass "换过接口的员工，出事时还能拿到日志（LAST_LOG 活着）" \
+  || fail "换过接口的员工的日志路径丢了——出事只会说'没通'，说不出为什么"
+
+# ---------- 6. 台账必须标出这笔走的谁家 ----------
+last_provider="$(tail -1 "$COST_LOG" 2>/dev/null | awk -F'\t' '{print $5}')"
+check "账单标了走的谁家接口" "官方" "$last_provider"
+
+# ---------- 7. 接口指定了模型，就不许再传角色定义里的「模型：」 ----------
+# 拿别家的接口点一道人家菜单上没有的菜，只会调不通。
+provider_apply 内容 deepseek
+: > "$FAKE_CLAUDE_DUMP"
+NO_GROUP_CHAT=1 ROLE_ISOLATED=1 ask_role 内容 "随便问一句" >/dev/null 2>&1
+if grep -q '^ARGS=.*--model sonnet' "$FAKE_CLAUDE_DUMP"; then
+  fail "接口已指定模型，却还把角色定义里的「模型：sonnet」传过去了"
+else
+  pass "接口指定了模型时，不再传角色定义里的「模型：」"
+fi
+
+# ---------- 8. 换回官方要换得干净 ----------
+provider_apply 客服 官方
+check "换回官方后认定为官方" "官方" "$(role_provider 客服)"
+[ -f "$(role_env 客服)" ] && fail "换回官方了，接口文件却还在" \
+  || pass "换回官方后，接口文件清干净了"
+
+echo
+if [ "$FAILED" = 0 ]; then echo "接口隔离自测：全部通过"; else echo "接口隔离自测：有失败项"; fi
+exit "$FAILED"
+
+▼▼▼ FILE: scripts/test-数字漂移.sh ▼▼▼
+#!/usr/bin/env bash
+# 数字漂移测试：工程交接包.md 里写死的「命令数」是个断言，
+# 必须和 loop.sh 真实数出来的一致。改了命令没同步改文档，这里就会红。
+#
+# 照 test-听懂.sh 里"说明书第N步 vs 真实位置"那套逐项比对的路子。
+# 只守【命令数】——它是断言。自测子项数 55 标了"快照"（快照本来就允许过期），不进这里。
+# 尺子用第八节那条新的（含 A-Z0-9-、并排除 help），别用旧的，否则又会漂。
+#
+# 想亲眼看它会红：BREAK=1 bash scripts/test-数字漂移.sh
+#   会读一份被改成 45 的临时文档副本，证明不一致时确实变红。
+
+set -uo pipefail
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+FAILED=0
+pass() { printf '  [通过] %s\n' "$1"; }
+fail() { printf '  [失败] %s\n' "$1"; }
+
+DOC="$REPO/工程交接包.md"
+if [ -n "${BREAK:-}" ]; then
+  TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+  cp "$DOC" "$TMP/doc.md"
+  sed -i 's/主程序，46 条命令/主程序，45 条命令/' "$TMP/doc.md"
+  DOC="$TMP/doc.md"
+fi
+
+echo
+echo "=== 数字漂移：命令数（文档断言 vs loop.sh 实数） ==="
+
+# 文档里写死的命令数（认第三节"主程序，N 条命令"那个权威位置）
+doc_n="$(grep -oE '主程序，[0-9]+ 条命令' "$DOC" | head -1 | grep -oE '[0-9]+' || true)"
+# loop.sh 真实数出来的（第八节那条新尺子：含 A-Z0-9-，且排除 help）
+real_n="$(sed -n '/^main() {/,/^}/p' "$REPO/loop.sh" | grep -E '^\s+[a-zA-Z0-9|一-龥-]+\)' | grep -cv help || true)"
+
+if [ -z "$doc_n" ]; then
+  fail "文档里没找到「主程序，N 条命令」这个断言——格式被改了？"
+  FAILED=1
+elif [ "$doc_n" = "$real_n" ]; then
+  pass "命令数一致：文档写 $doc_n，loop.sh 实数 $real_n"
+else
+  fail "命令数漂了：文档写 $doc_n，loop.sh 实数 $real_n。改了命令就得同步改文档那个数。"
+  FAILED=1
+fi
+
+echo
+if [ "$FAILED" = 0 ]; then echo "数字漂移自测：全部通过"; else echo "数字漂移自测：有失败项"; fi
+exit "$FAILED"
+
+▼▼▼ FILE: scripts/test-止损.sh ▼▼▼
+#!/usr/bin/env bash
+# 止损（stoploss）自测。不花钱、不联网。
+#
+# 止损线的失败方式也是静默的：屏幕说"记下了"，.loop/止损线 却是空的。
+# 日报每天拿这条对"到没到止损线"——写丢了，就等于永远不会喊停，
+# 而这套系统存在的头号意义就是"该停的时候喊停"。
+#
+# 想亲眼看它会红：BREAK=1 bash scripts/test-止损.sh
+#   会把沙盘里 state_set 的落盘掐成写到 /dev/null，止损线文件不会生成，测试必须变红。
+
+set -uo pipefail
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+FAILED=0
+pass() { printf '  [通过] %s\n' "$1"; }
+fail() { printf '  [失败] %s\n' "$1"; FAILED=1; }
+check() {
+  if [ "$2" = "$3" ]; then pass "$1"
+  else fail "$1"; printf '         期望：%s\n         实际：%s\n' "$2" "$3"; fi
+}
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+SB="$TMP/sb"
+mkdir -p "$SB"
+cp "$REPO/loop.sh" "$SB/"
+cp -r "$REPO/scripts" "$SB/"
+rm -rf "$SB/scripts/__pycache__"
+chmod +x "$SB/loop.sh"
+
+# —— 故意弄坏（证明测试会红）：让 state_set 不再落盘 ——
+if [ -n "${BREAK:-}" ]; then
+  sed -i 's#> "\$STATE_DIR/\$key"#> /dev/null#' "$SB/scripts/lib.sh"
+fi
+
+F="$SB/.loop/止损线"
+TXT="到6月底还没有10个付费用户就停，然后改方向"
+run() { ( cd "$SB" && ./loop.sh "$@" ); }
+
+echo
+echo "=== 止损 stoploss 自测 ==="
+
+# 1. 定一条止损线，文件要真出现
+run 止损 "$TXT" >/dev/null 2>&1
+[ -f "$F" ] && pass "定完之后 .loop/止损线 真的生成了" \
+  || fail "止损线文件没生成（屏幕上可能还写着'记下了'）"
+
+# 2. 写进去的内容要一字不差（查真实副作用）
+check "止损线内容 = 原文" "$TXT" "$(cat "$F" 2>/dev/null)"
+
+# 3. 不带参数只是"看一眼"，不许把已定的止损线覆盖/清空
+run 止损 >/dev/null 2>&1
+check "空参数不覆盖已定的止损线" "$TXT" "$(cat "$F" 2>/dev/null)"
+
+echo
+if [ "$FAILED" = 0 ]; then echo "止损自测：全部通过"; else echo "止损自测：有失败项"; fi
+exit "$FAILED"
+
+▼▼▼ FILE: scripts/test-蓝图.sh ▼▼▼
+#!/usr/bin/env bash
+# 产品蓝图收敛循环的自测。不花钱、不联网。
+#
+# 这个循环最坏的失败方式：
+#   ① 它自己说"定了"就往下走了 —— 拍板必须是你亲口说的，不是它替你说
+#   ② 你说"挺好的"被当成拍板 —— 那是客气，不是决定
+#   ③ 一次把好几个问题甩给你（用户只做一件事：回答一个问题）
+#   ④ 每答一个就重跑一次 AI（三个问题花三次钱）
+#   ⑤ 改了十几轮还在原地转，不说实话
+
+set -uo pipefail
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+FAILED=0
+pass() { printf '  [通过] %s\n' "$1"; }
+fail() { printf '  [失败] %s\n' "$1"; FAILED=1; }
+
+echo
+echo "=== 蓝图收敛循环自测 ==="
+
+TMP="$(mktemp -d)"
+if [ "${KEEP_TMP:-0}" = 1 ]; then echo "沙盘留在：$TMP"; else trap 'rm -rf "$TMP"' EXIT; fi
+SB="$TMP/sb"; mkdir -p "$SB/docs"
+cp "$REPO/loop.sh" "$SB/"
+cp -r "$REPO/scripts" "$REPO/.claude" "$REPO/roles-模板" "$SB/"
+rm -rf "$SB/scripts/__pycache__"
+chmod +x "$SB/loop.sh"
+printf '# 听到的\n真实痛点：老忘了回访\n' > "$SB/docs/00-听到的.md"
+
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/claude" <<'FAKE'
+#!/usr/bin/env bash
+p="$(cat)"
+n=$(ls "$DUMP_DIR" 2>/dev/null | wc -l)
+printf '%s' "$p" > "$DUMP_DIR/$n.txt"
+[ -n "${FAKE_WRITE:-}" ] && { mkdir -p "$(dirname "$FAKE_WRITE")"; printf '%s\n' "${FAKE_BODY:-}" > "$FAKE_WRITE"; }
+echo '{"result":"假的","total_cost_usd":0.01,"duration_ms":100}'
+FAKE
+chmod +x "$TMP/bin/claude"
+export CLAUDE_BIN="$TMP/bin/claude" DUMP_DIR="$TMP/dump"; mkdir -p "$DUMP_DIR"
+export FAKE_WRITE="$SB/docs/00-蓝图.md"
+export FAKE_BODY='# 00 · 蓝图
+
+轮次：第 1 轮   状态：还在改
+
+## 你要做的这个东西
+一个不让你把老客户搞丢的小本子
+
+## 我想确认一件事
+
+### 问题 1：甲问题
+- **A** 甲的A
+- **B** 甲的B
+
+### 问题 2：乙问题
+- **A** 乙的A
+
+## 详细版
+### 用户流程
+一二三'
+
+cd "$SB"
+out="$(./loop.sh 蓝图 2>&1)"
+
+# ---------- 一、还没定，不许往下走 ----------
+printf '%s' "$out" | grep -q "有一件事想跟你确认" \
+  && pass "画完停下来问你，没有自己往下跑" || fail "没停下来"
+
+# ---------- 二、一次只给一个 ----------
+if printf '%s' "$out" | grep -q "甲问题" && ! printf '%s' "$out" | grep -q "乙问题"; then
+  pass "一次只显示一个问题"
+else
+  fail "一次把两个问题都甩出来了"
+fi
+
+# ---------- 三、详细版不许倒给用户 ----------
+printf '%s' "$out" | grep -q "用户流程" \
+  && fail "把详细版也倒到屏幕上了 —— 默认只该给人性化那版" \
+  || pass "屏幕上只给人性化那版，详细版留在文件里"
+
+# ---------- 四、答第一个：本地接上第二个，不重跑 AI ----------
+before=$(ls "$DUMP_DIR" | wc -l)
+out2="$(./loop.sh 改 "A" 2>&1)"
+after=$(ls "$DUMP_DIR" | wc -l)
+printf '%s' "$out2" | grep -q "乙问题" \
+  && pass "答完第一个，本地接上第二个" || fail "没接上第二个"
+[ "$after" -eq "$before" ] \
+  && pass "问第二个没有再花钱跑 AI" || fail "每答一个就重跑一次 AI"
+
+# ---------- 五、全答完才重跑一轮 ----------
+export FAKE_BODY='# 00 · 蓝图
+
+轮次：第 2 轮   状态：还在改
+
+## 我想确认一件事
+
+### 问题 1：第二轮的问题
+- **A** 是
+
+## 详细版'
+out3="$(./loop.sh 改 "A" 2>&1)"
+[ "$(grep -cE '轮次(:|：)[[:space:]]*第[[:space:]]*2' docs/00-蓝图.md)" -ge 1 ] \
+  && pass "全答完了才重跑一轮（轮次前进）" || fail "没有重跑"
+
+# ---------- 六、【最要紧】它不许自己说定了 ----------
+grep -qE '状态(:|：)[[:space:]]*就是它了' docs/00-蓝图.md \
+  && fail "它自己写了「就是它了」——拍板必须是你亲口说的" \
+  || pass "它没替你拍板"
+
+# ---------- 七、你亲口说了，才锁 ----------
+out4="$(./loop.sh 定了 2>&1)"
+printf '%s' "$out4" | grep -q "定了" && grep -qE '状态(:|：)[[:space:]]*就是它了' docs/00-蓝图.md \
+  && pass "你说「定了」之后才锁定" || fail "锁定没生效"
+grep -q "对，这就是我要做的" docs/00-蓝图.md \
+  && pass "拍板这件事留了痕（回头查得到是谁定的）" || fail "拍板没留痕"
+
+# ---------- 八、锁了之后再跑，是「定了」不是接着问 ----------
+export FAKE_BODY='轮次：第 3 轮   状态：就是它了'
+out5="$(./loop.sh 蓝图 2>&1)"
+printf '%s' "$out5" | grep -q "接着往下" \
+  && pass "锁定之后提示往下走，不再纠缠" || fail "锁定后还在问"
+
+# ---------- 九、转太多轮要说实话 ----------
+SB2="$TMP/sb2"; cp -r "$SB" "$SB2"; rm -rf "$SB2/.loop"
+export FAKE_WRITE="$SB2/docs/00-蓝图.md"
+printf '轮次：第 12 轮   状态：还在改\n' > "$SB2/docs/00-蓝图.md"
+out6="$( cd "$SB2" && BP_MAX_ROUNDS=12 ./loop.sh 蓝图 2>&1 )"
+printf '%s' "$out6" | grep -q "还没定下来" \
+  && pass "转太多轮会说实话，不无限转下去" || fail "转了十几轮还在若无其事地接着问"
+
+# ---------- 十、知识库那个口子真的会被读进去 ----------
+SB3="$TMP/sb3"; cp -r "$SB" "$SB3"; rm -rf "$SB3/.loop" "$SB3/docs/00-蓝图.md"
+mkdir -p "$SB3/references/我的知识库"
+printf '我的审美：宁可少一个功能，也不要多一次点击\n' > "$SB3/references/我的知识库/审美.md"
+export FAKE_WRITE="" DUMP_DIR="$TMP/dump3"; mkdir -p "$DUMP_DIR"
+( cd "$SB3" && ./loop.sh 蓝图 >/dev/null 2>&1 )
+grep -rq "宁可少一个功能" "$DUMP_DIR" 2>/dev/null \
+  && pass "references/我的知识库/ 里的东西真的喂进去了" \
+  || fail "知识库那个口子是空的 —— 放了东西也没被读"
+
+echo
+if [ "$FAILED" = 0 ]; then echo "蓝图自测：全部通过"; else echo "蓝图自测：有失败项"; fi
+exit "$FAILED"
+
+▼▼▼ FILE: scripts/test-记账.sh ▼▼▼
+#!/usr/bin/env bash
+# 记账（account）自测。不花钱、不联网。
+#
+# 记账最坏的失败方式不是报错，是【屏幕上说"记下了"，账本.tsv 里却什么都没落】。
+# 日报和看板都读这个文件，一旦静默丢账，后面全是错的数，而且看不出来。
+# 所以这里不测"命令报没报错"，测【.loop/账本.tsv 里到底落了什么】。
+#
+# 想亲眼看它会红：BREAK=1 bash scripts/test-记账.sh
+#   会把沙盘里 cmd_ledger 的追加写掐成写到 /dev/null（屏幕照样说"记下了"，
+#   但账本不会有那一行）——这就是"看起来对但其实没做"，测试必须因此变红。
+
+set -uo pipefail
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+FAILED=0
+pass() { printf '  [通过] %s\n' "$1"; }
+fail() { printf '  [失败] %s\n' "$1"; FAILED=1; }
+check() {
+  if [ "$2" = "$3" ]; then pass "$1"
+  else fail "$1"; printf '         期望：%s\n         实际：%s\n' "$2" "$3"; fi
+}
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+SB="$TMP/sb"
+mkdir -p "$SB"
+cp "$REPO/loop.sh" "$SB/"
+cp -r "$REPO/scripts" "$SB/"
+rm -rf "$SB/scripts/__pycache__"
+chmod +x "$SB/loop.sh"
+
+# —— 故意弄坏（证明测试会红）：把追加写掐掉，只留下屏幕上那句"记下了" ——
+if [ -n "${BREAK:-}" ]; then
+  sed -i 's#>> "\$LEDGER"#> /dev/null#' "$SB/loop.sh"
+fi
+
+L="$SB/.loop/账本.tsv"
+run() { ( cd "$SB" && ./loop.sh "$@" ); }
+
+echo
+echo "=== 记账 account 自测 ==="
+
+# 1. 记一笔收入，账本文件要真出现
+run 记账 收 500 "第一单" >/dev/null 2>&1
+[ -f "$L" ] && pass "记账之后 .loop/账本.tsv 真的生成了" \
+  || fail "账本.tsv 没生成（屏幕上可能还写着'记下了'）"
+
+# 2. 落进去的那一行，四列都要对（核心：查真实副作用，不查回显）
+last="$(tail -1 "$L" 2>/dev/null)"
+check "日期列 = 今天"   "$(date '+%Y-%m-%d')" "$(printf '%s' "$last" | cut -f1)"
+check "收支列 = 收"     "收"                  "$(printf '%s' "$last" | cut -f2)"
+check "金额列 = 500"    "500"                 "$(printf '%s' "$last" | cut -f3)"
+check "说明列 = 第一单"  "第一单"              "$(printf '%s' "$last" | cut -f4)"
+
+# 3. 表头要在（日报/看板靠列位解析，表头丢了就全错位）
+check "表头第 3 列 = 金额" "金额" "$(head -1 "$L" 2>/dev/null | cut -f3)"
+
+# 4. 再记一笔支出，必须【追加】不是【覆盖】——两条数据行都要在
+run 记账 支 30 "服务器" >/dev/null 2>&1
+datarows="$(($(wc -l < "$L") - 1))"
+check "两笔都在（追加而非覆盖），共 2 条数据行" "2" "$datarows"
+check "第二笔收支列 = 支" "支" "$(tail -1 "$L" | cut -f2)"
+
+# 5. 非法收支类别要被拒，而且【不许静默写坏账】
+rows_before="$(wc -l < "$L")"
+rc=0; run 记账 增 100 >/dev/null 2>&1 || rc=$?
+[ "$rc" -ne 0 ] && pass "非法类别（增）被拒，退出码非零" \
+  || fail "非法类别没被拒（静默接受了坏数据）"
+check "非法类别没污染账本（行数没变）" "$rows_before" "$(wc -l < "$L")"
+
+echo
+if [ "$FAILED" = 0 ]; then echo "记账自测：全部通过"; else echo "记账自测：有失败项"; fi
+exit "$FAILED"
 
 ▼▼▼ FILE: scripts/test-论证.sh ▼▼▼
 #!/usr/bin/env bash
@@ -4729,151 +5111,102 @@ echo
 if [ "$FAILED" = 0 ]; then echo "论证自测：全部通过"; else echo "论证自测：有失败项"; fi
 exit "$FAILED"
 
-
-▼▼▼ FILE: scripts/test-蓝图.sh ▼▼▼
-#!/usr/bin/env bash
-# 产品蓝图收敛循环的自测。不花钱、不联网。
+▼▼▼ FILE: tests/test_状态.py ▼▼▼
+# scripts/状态.py 的自测（这个文件此前覆盖为零，这次补上）。
 #
-# 这个循环最坏的失败方式：
-#   ① 它自己说"定了"就往下走了 —— 拍板必须是你亲口说的，不是它替你说
-#   ② 你说"挺好的"被当成拍板 —— 那是客气，不是决定
-#   ③ 一次把好几个问题甩给你（用户只做一件事：回答一个问题）
-#   ④ 每答一个就重跑一次 AI（三个问题花三次钱）
-#   ⑤ 改了十几轮还在原地转，不说实话
+# 状态.py 把 .loop/ 读成一个字典，看板（静态 HTML）和面板都靠它。
+# 它的失败方式是静默的：net 算错、少读一步、清单跟 lib.sh 漂了——
+# 屏幕上照样出数，你不知道那是错的。所以这里喂造好的状态，断言它算出来的数。
+#
+# 想亲眼看它会红：BREAK=1 python -m pytest tests/test_状态.py
+#   会加载一个被做了手脚的 状态.py 副本（把 net=收-支 改成 收+支），
+#   证明这套测试真的会因为"算错"而变红——不是只会绿。
+#   （做手脚只发生在临时副本上，仓库里的 scripts/状态.py 一个字都不动。）
 
-set -uo pipefail
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-FAILED=0
-pass() { printf '  [通过] %s\n' "$1"; }
-fail() { printf '  [失败] %s\n' "$1"; FAILED=1; }
+import importlib.util
+import os
+import pathlib
+import subprocess
+import tempfile
 
-echo
-echo "=== 蓝图收敛循环自测 ==="
+REPO = pathlib.Path(__file__).resolve().parent.parent
+SRC = REPO / "scripts" / "状态.py"
 
-TMP="$(mktemp -d)"
-if [ "${KEEP_TMP:-0}" = 1 ]; then echo "沙盘留在：$TMP"; else trap 'rm -rf "$TMP"' EXIT; fi
-SB="$TMP/sb"; mkdir -p "$SB/docs"
-cp "$REPO/loop.sh" "$SB/"
-cp -r "$REPO/scripts" "$REPO/.claude" "$REPO/roles-模板" "$SB/"
-rm -rf "$SB/scripts/__pycache__"
-chmod +x "$SB/loop.sh"
-printf '# 听到的\n真实痛点：老忘了回访\n' > "$SB/docs/00-听到的.md"
 
-mkdir -p "$TMP/bin"
-cat > "$TMP/bin/claude" <<'FAKE'
-#!/usr/bin/env bash
-p="$(cat)"
-n=$(ls "$DUMP_DIR" 2>/dev/null | wc -l)
-printf '%s' "$p" > "$DUMP_DIR/$n.txt"
-[ -n "${FAKE_WRITE:-}" ] && { mkdir -p "$(dirname "$FAKE_WRITE")"; printf '%s\n' "${FAKE_BODY:-}" > "$FAKE_WRITE"; }
-echo '{"result":"假的","total_cost_usd":0.01,"duration_ms":100}'
-FAKE
-chmod +x "$TMP/bin/claude"
-export CLAUDE_BIN="$TMP/bin/claude" DUMP_DIR="$TMP/dump"; mkdir -p "$DUMP_DIR"
-export FAKE_WRITE="$SB/docs/00-蓝图.md"
-export FAKE_BODY='# 00 · 蓝图
+def load_status():
+    """加载被测的 状态.py。BREAK 时加载一个故意算错 net 的副本。"""
+    src = SRC.read_text(encoding="utf-8")
+    if os.environ.get("BREAK"):
+        broken = src.replace("net=round(inc - exp, 2)", "net=round(inc + exp, 2)")
+        assert broken != src, "BREAK 没生效：没找到 net 那一行，源码结构变了？"
+        src = broken
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, "status_under_test.py")
+    pathlib.Path(p).write_text(src, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("status_under_test", p)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
 
-轮次：第 1 轮   状态：还在改
 
-## 你要做的这个东西
-一个不让你把老客户搞丢的小本子
+def _loop(tmp):
+    L = os.path.join(tmp, ".loop")
+    os.makedirs(os.path.join(L, "roles"), exist_ok=True)
+    os.makedirs(os.path.join(tmp, "docs"), exist_ok=True)
+    return L
 
-## 我想确认一件事
 
-### 问题 1：甲问题
-- **A** 甲的A
-- **B** 甲的B
+def _w(path, text):
+    pathlib.Path(path).write_text(text, encoding="utf-8")
 
-### 问题 2：乙问题
-- **A** 乙的A
 
-## 详细版
-### 用户流程
-一二三'
+def test_账本_收支净额():
+    # 账本.tsv 的收/支要被正确加总，净额 = 收 - 支。
+    ST = load_status()
+    tmp = tempfile.mkdtemp()
+    L = _loop(tmp)
+    _w(os.path.join(L, "stage"), "goal")
+    _w(os.path.join(L, "账本.tsv"),
+       "日期\t收支\t金额\t说明\n"
+       "2026-08-01\t收\t500\t第一单\n"
+       "2026-08-02\t支\t30\t服务器\n")
+    s = ST.read_all(tmp)
+    assert s["income"] == 500.0
+    assert s["outgo"] == 30.0
+    assert s["net"] == 470.0   # BREAK 时会算成 530.0 → 这条变红
 
-cd "$SB"
-out="$(./loop.sh 蓝图 2>&1)"
 
-# ---------- 一、还没定，不许往下走 ----------
-printf '%s' "$out" | grep -q "有一件事想跟你确认" \
-  && pass "画完停下来问你，没有自己往下跑" || fail "没停下来"
+def test_止损线_读得出():
+    ST = load_status()
+    tmp = tempfile.mkdtemp()
+    L = _loop(tmp)
+    txt = "到6月底还没有10个付费用户就停"
+    _w(os.path.join(L, "止损线"), txt)
+    s = ST.read_all(tmp)
+    assert s["stoploss"] == txt
 
-# ---------- 二、一次只给一个 ----------
-if printf '%s' "$out" | grep -q "甲问题" && ! printf '%s' "$out" | grep -q "乙问题"; then
-  pass "一次只显示一个问题"
-else
-  fail "一次把两个问题都甩出来了"
-fi
 
-# ---------- 三、详细版不许倒给用户 ----------
-printf '%s' "$out" | grep -q "用户流程" \
-  && fail "把详细版也倒到屏幕上了 —— 默认只该给人性化那版" \
-  || pass "屏幕上只给人性化那版，详细版留在文件里"
+def test_进度_stage_index():
+    # 听懂=0, goal=1, giants=2, edge=3, taste=4
+    ST = load_status()
+    tmp = tempfile.mkdtemp()
+    L = _loop(tmp)
+    _w(os.path.join(L, "stage"), "taste")
+    s = ST.read_all(tmp)
+    assert s["stage"] == "taste"
+    assert s["stage_index"] == 4
 
-# ---------- 四、答第一个：本地接上第二个，不重跑 AI ----------
-before=$(ls "$DUMP_DIR" | wc -l)
-out2="$(./loop.sh 改 "A" 2>&1)"
-after=$(ls "$DUMP_DIR" | wc -l)
-printf '%s' "$out2" | grep -q "乙问题" \
-  && pass "答完第一个，本地接上第二个" || fail "没接上第二个"
-[ "$after" -eq "$before" ] \
-  && pass "问第二个没有再花钱跑 AI" || fail "每答一个就重跑一次 AI"
 
-# ---------- 五、全答完才重跑一轮 ----------
-export FAKE_BODY='# 00 · 蓝图
-
-轮次：第 2 轮   状态：还在改
-
-## 我想确认一件事
-
-### 问题 1：第二轮的问题
-- **A** 是
-
-## 详细版'
-out3="$(./loop.sh 改 "A" 2>&1)"
-[ "$(grep -cE '轮次(:|：)[[:space:]]*第[[:space:]]*2' docs/00-蓝图.md)" -ge 1 ] \
-  && pass "全答完了才重跑一轮（轮次前进）" || fail "没有重跑"
-
-# ---------- 六、【最要紧】它不许自己说定了 ----------
-grep -qE '状态(:|：)[[:space:]]*就是它了' docs/00-蓝图.md \
-  && fail "它自己写了「就是它了」——拍板必须是你亲口说的" \
-  || pass "它没替你拍板"
-
-# ---------- 七、你亲口说了，才锁 ----------
-out4="$(./loop.sh 定了 2>&1)"
-printf '%s' "$out4" | grep -q "定了" && grep -qE '状态(:|：)[[:space:]]*就是它了' docs/00-蓝图.md \
-  && pass "你说「定了」之后才锁定" || fail "锁定没生效"
-grep -q "对，这就是我要做的" docs/00-蓝图.md \
-  && pass "拍板这件事留了痕（回头查得到是谁定的）" || fail "拍板没留痕"
-
-# ---------- 八、锁了之后再跑，是「定了」不是接着问 ----------
-export FAKE_BODY='轮次：第 3 轮   状态：就是它了'
-out5="$(./loop.sh 蓝图 2>&1)"
-printf '%s' "$out5" | grep -q "接着往下" \
-  && pass "锁定之后提示往下走，不再纠缠" || fail "锁定后还在问"
-
-# ---------- 九、转太多轮要说实话 ----------
-SB2="$TMP/sb2"; cp -r "$SB" "$SB2"; rm -rf "$SB2/.loop"
-export FAKE_WRITE="$SB2/docs/00-蓝图.md"
-printf '轮次：第 12 轮   状态：还在改\n' > "$SB2/docs/00-蓝图.md"
-out6="$( cd "$SB2" && BP_MAX_ROUNDS=12 ./loop.sh 蓝图 2>&1 )"
-printf '%s' "$out6" | grep -q "还没定下来" \
-  && pass "转太多轮会说实话，不无限转下去" || fail "转了十几轮还在若无其事地接着问"
-
-# ---------- 十、知识库那个口子真的会被读进去 ----------
-SB3="$TMP/sb3"; cp -r "$SB" "$SB3"; rm -rf "$SB3/.loop" "$SB3/docs/00-蓝图.md"
-mkdir -p "$SB3/references/我的知识库"
-printf '我的审美：宁可少一个功能，也不要多一次点击\n' > "$SB3/references/我的知识库/审美.md"
-export FAKE_WRITE="" DUMP_DIR="$TMP/dump3"; mkdir -p "$DUMP_DIR"
-( cd "$SB3" && ./loop.sh 蓝图 >/dev/null 2>&1 )
-grep -rq "宁可少一个功能" "$DUMP_DIR" 2>/dev/null \
-  && pass "references/我的知识库/ 里的东西真的喂进去了" \
-  || fail "知识库那个口子是空的 —— 放了东西也没被读"
-
-echo
-if [ "$FAILED" = 0 ]; then echo "蓝图自测：全部通过"; else echo "蓝图自测：有失败项"; fi
-exit "$FAILED"
-
+def test_十步清单不跟_libsh_漂移():
+    # 状态.py 的 STAGES 是从 lib.sh 抄来的，抄的会漂。逐项对着 lib.sh 比。
+    ST = load_status()
+    r = subprocess.run(
+        ["bash", "-c", '. "$1/scripts/lib.sh"; printf "%s\\n" "${STAGES[@]}"', "_", str(REPO)],
+        capture_output=True, text=True, cwd=str(REPO))
+    want = r.stdout.split()
+    got = [k for k, _ in ST.STAGES]
+    assert want, "没能从 lib.sh 读到 STAGES"
+    assert want == got, "十步清单漂了：lib.sh=%s 状态.py=%s" % (want, got)
 
 ▼▼▼ FILE: .gitignore ▼▼▼
 # 流水线的运行状态和日志：本地的东西，不进版本库
@@ -4908,5 +5241,3 @@ target/
 .claude/settings.local.json
 work/
 看板.html
-
-
