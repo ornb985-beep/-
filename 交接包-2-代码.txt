@@ -1,0 +1,4912 @@
+═══ MoneyLoop 交接包 2/3 · 主程序和测试（这是你要动的代码） ═══
+（每个文件以「▼▼▼ FILE: 路径 ▼▼▼」开头，按这行切分）
+
+
+▼▼▼ FILE: loop.sh ▼▼▼
+#!/usr/bin/env bash
+# 自动化流水线主程序。
+# 用法：
+#   ./loop.sh start "我想做一个帮我记录客户跟进的小工具"
+#   ./loop.sh go        继续往下跑
+#   ./loop.sh status    看现在到哪一步了
+#   ./loop.sh explain   用大白话讲一遍现在的情况
+#   ./loop.sh back      退回上一步重做
+#   ./loop.sh reset     全部清空重来（会先备份）
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib.sh
+source "$ROOT/scripts/lib.sh"
+
+MAX_BUILD_ROUNDS="${MAX_BUILD_ROUNDS:-30}"   # 造东西阶段最多循环多少轮，防止无限烧钱
+MAX_FIX_TRIES="${MAX_FIX_TRIES:-3}"          # 单个任务测试不过，最多自动修几次
+
+# ============================================================
+# 阶段执行
+# ============================================================
+
+# claude 跑挂了之后，统一在这儿决定「怎么跟人说」。
+#
+# 关键是分清两种失败：外面的原因（额度用完、断网）重跑没用，等就行；
+# 真做错了才需要看日志改东西。混为一谈的后果是对着上限空转——真发生过。
+# 返回 2 表示外部原因卡住（可以等），真失败直接 die。
+report_failure() {
+  local rc="$1" what="$2"
+  local b; b="$(blocker_reason "$LAST_LOG" || true)"
+  if [ -n "$b" ]; then
+    rule
+    case "${b%%$'\t'*}" in
+      quota)   warn "不是代码坏了，是 AI 的额度用完了。" ;;
+      network) warn "不是代码坏了，是连不上网。" ;;
+    esac
+    say "  它自己的原话：${C_DIM}${b#*$'\t'}${C_OFF}"
+    say ""
+    say "${C_BOLD}现在重跑没有用${C_OFF}，会得到一模一样的结果。等恢复了再跑 ${C_BOLD}./loop.sh go${C_OFF}——"
+    say "前面做完的几步不会重做，直接从卡住的这一步接着跑。"
+    rule
+    return 2
+  fi
+  die "${what}（退出码 $rc）。日志在 .loop/log/ 里，可以直接把日志贴给我看。"
+}
+
+# 跑一个非 build 阶段
+run_stage() {
+  local stage="$1"
+  local cmd_file="$CMD_DIR/$stage.md"
+  [ -f "$cmd_file" ] || die "找不到这一步的说明书：$cmd_file"
+
+  title "$(stage_label "$stage")"
+  rule
+
+  # 把之前所有阶段的产出当作上下文喂进去，保证它记得前因后果
+  local ctx=()
+  local s
+  for s in "${STAGES[@]}"; do
+    [ "$s" = "$stage" ] && break
+    local d; d="$(stage_doc "$s")"
+    [ -n "$d" ] && [ -f "$d" ] && ctx+=("$d")
+  done
+
+  # 重跑这一步时，把上一版也给它看。
+  #
+  # 「听懂」那一步天然要跑好几轮（引导式问答）：第2轮必须看得见
+  # 第1轮问了什么、你答了什么，否则每轮都从头把同样的问题再问一遍。
+  # 对别的步也是对的——back 退回来重做时，看着旧版改比从零重写强。
+  local own; own="$(stage_doc "$stage")"
+  [ -n "$own" ] && [ -f "$own" ] && ctx+=("$own")
+
+  local rc=0
+  claude_run "$cmd_file" "${ctx[@]+"${ctx[@]}"}" || rc=$?
+  if [ "$rc" -eq 3 ]; then
+    return 3   # 没装 claude，已提示手动执行
+  elif [ "$rc" -ne 0 ]; then
+    report_failure "$rc" "这一步没跑成功"
+    return $?
+  fi
+
+  # 「跑过」不等于「跑成了」。
+  # claude 可能正常退出（退出码 0），但因为查不了资料、权限不够等原因
+  # 根本没产出该产出的东西。这时候如果照样标记成功、照样往下走，
+  # 后面每一步都会建立在空气上——而且每步看着都是 ✓。
+  # 所以：该产出的文件不在，就是没做成，停下。
+  local doc; doc="$(stage_doc "$stage")"
+  if [ -n "$doc" ] && [ ! -f "$doc" ]; then
+    rule
+    warn "这一步没有产出 $(basename "$doc")，按「没做成」处理，不往下走。"
+    say ""
+    if [ -f "$DOC_DIR/05-我不懂的.md" ]; then
+      say "它把卡在哪写下来了，先看这个：${C_BOLD}docs/05-我不懂的.md${C_OFF}"
+      say "里面通常有一道选择题，你选完再跑 ./loop.sh go 继续。"
+    else
+      say "日志在 .loop/log/ 里，最新那个就是。可以直接把它贴给我看。"
+    fi
+    rule
+    return 1
+  fi
+
+  state_set "ran_$stage" yes    # 到这儿才算真的跑成了
+  return 0
+}
+
+# 需要你点头的阶段，停下来等确认
+signoff_gate() {
+  local stage="$1"
+  local doc; doc="$(stage_doc "$stage")"
+
+  rule
+  title "该你拍板了"
+  say "刚才这一步的结果写在：${C_BOLD}${doc}${C_OFF}"
+  say ""
+  say "请打开看一遍。这一步是${C_BOLD}你的判断${C_OFF}，不是技术问题——"
+  case "$stage" in
+    edge)  say "  它给出了「共性该守什么、独特该赌什么」。这是这东西的命，看仔细。" ;;
+    taste) say "  它列了几个「什么算好」的标准和取舍，挑你认同的，划掉你不认同的。" ;;
+    spec)  say "  它列了要做的功能和验收标准，砍掉你觉得没必要的，补上它漏掉的。" ;;
+    stack) say "  它列了在哪儿落地、用什么做、大概花多少钱。你确认花销和方式能接受。" ;;
+  esac
+  # 把文档里的「怎么验收这一步」直接打出来，省得你还要翻文件找
+  local checklist; checklist="$(extract_checklist "$doc")"
+  if [ -n "$checklist" ]; then
+    say ""
+    printf '%s五分钟验收单%s（照着过一遍就行，不用懂技术）\n' "$C_BOLD" "$C_OFF"
+    printf '%s\n' "$checklist"
+  fi
+
+  say ""
+  say "${C_DIM}提示：你直接在文件里改字、划掉、补充就行。你改过的地方，后面每一步都会当成最高优先级。${C_OFF}"
+  say ""
+  say "接下来你可以："
+  say "  ${C_BOLD}./loop.sh go${C_OFF}      看完没问题，继续往下"
+  say "  ${C_BOLD}./loop.sh judge${C_OFF}   不知道好不好？让它逼问自己一遍，给你选择题"
+  say "  ${C_BOLD}./loop.sh back${C_OFF}    这一步方向就不对，退回重做"
+  rule
+}
+
+# 从文档里抠出「## 怎么验收这一步」那一段
+extract_checklist() {
+  local f="$1"
+  [ -f "$f" ] || return 0
+  awk '
+    /^##[[:space:]]*怎么验收这一步/ { on=1; next }
+    on && /^##[[:space:]]/ { on=0 }
+    on && !/^```/ { print }
+  ' "$f" | sed '/^[[:space:]]*$/d'
+}
+
+# ============================================================
+# build 阶段：真正的自动循环
+# ============================================================
+run_build_loop() {
+  title "$(stage_label build)"
+  say "${C_DIM}规则：挑一个任务 → 做 → 跑检查 → 不过就自己修（最多 ${MAX_FIX_TRIES} 次）→ 过了就勾掉，下一个${C_OFF}"
+  rule
+
+  local round=0
+  while :; do
+    local open done_before rev_before
+    open="$(tasks_open)"; done_before="$(tasks_done)"; rev_before="$(revisions_count)"
+    if [ "$open" -eq 0 ]; then
+      ok "任务清单全部勾完了。"
+      return 0
+    fi
+
+    round=$((round+1))
+    if [ "$round" -gt "$MAX_BUILD_ROUNDS" ]; then
+      warn "已经跑了 $MAX_BUILD_ROUNDS 轮，先停下来喘口气（防止无限循环烧钱）。"
+      say  "确认没问题就再跑一次 ./loop.sh go 继续，或者调大 MAX_BUILD_ROUNDS。"
+      return 1
+    fi
+
+    local task; task="$(next_task)"
+
+    # 轮到只有你能干的任务，就停下来交给你，别派 AI 去替你猜。
+    # 白跑一次不只是浪费额度，更糟的是它问出来的问题会掉进日志里没人看见。
+    if task_is_human_gated "$task"; then
+      rule
+      title "轮到你了 —— 这条 AI 干不了，只有你能干"
+      say ""
+      next_task_block
+      say ""
+      rule
+      say "干完之后，去 ${C_BOLD}docs/07-任务清单.md${C_OFF} 把这条前面的 ${C_BOLD}[ ]${C_OFF} 改成 ${C_BOLD}[x]${C_OFF}，"
+      say "再跑 ${C_BOLD}./loop.sh go${C_OFF}，它会自己接着往下做。"
+      say ""
+      local gated; gated="$(tasks_human_gated)"
+      say "${C_DIM}还剩 $open 个任务，其中 $gated 个是这样需要你本人的，其余 $((open-gated)) 个它自己能做。${C_OFF}"
+      rule
+      return 2   # 2 = 在等你，不是出错了
+    fi
+
+    printf '\n%s[第 %s 轮]%s 正在做：%s\n' "$C_BOLD" "$round" "$C_OFF" "$task"
+
+    # 1) 做
+    claude_run "$CMD_DIR/build.md" \
+      "$DOC_DIR/02-共性与独特.md" "$DOC_DIR/03-什么算好.md" \
+      "$DOC_DIR/04-要做什么.md" "$DOC_DIR/06-技术与落地.md" "$TASKS_FILE" || {
+        local rc=$?; [ "$rc" -eq 3 ] && return 3
+        report_failure "$rc" "做的过程中出错了"; return $?; }
+
+    # 2) 检查 + 修
+    local try=0 passed=0
+    while [ "$try" -le "$MAX_FIX_TRIES" ]; do
+      local out; out="$STATE_DIR/last-check.txt"
+      if bash "$ROOT/scripts/check.sh" > "$out" 2>&1; then
+        ok "检查通过"
+        passed=1
+        break
+      fi
+      try=$((try+1))
+      if [ "$try" -gt "$MAX_FIX_TRIES" ]; then break; fi
+      warn "检查没过，自动修第 $try 次…"
+      # 把失败输出塞进提示词里
+      {
+        cat "$CMD_DIR/fix.md"
+        printf '\n\n---- 检查失败的原始输出 ----\n'
+        tail -c 8000 "$out"
+      } > "$STATE_DIR/fix-prompt.md"
+      claude_run "$STATE_DIR/fix-prompt.md" "$TASKS_FILE" || {
+        local rc=$?; [ "$rc" -eq 3 ] && return 3
+        report_failure "$rc" "修的过程中出错了"; return $?; }
+    done
+
+    if [ "$passed" -ne 1 ]; then
+      rule
+      warn "这个任务连修 $MAX_FIX_TRIES 次都没过，卡住了，需要你看一眼。"
+      say  "卡住的任务：$task"
+      say  "失败详情：$STATE_DIR/last-check.txt"
+      say  ""
+      say  "两个选择："
+      say  "  1. 直接跑 ${C_BOLD}./loop.sh explain${C_OFF}，让它用大白话讲清楚卡在哪、你要做什么决定"
+      say  "  2. 觉得这个任务不重要，去 docs/07-任务清单.md 里把它划掉，再 ./loop.sh go"
+      return 1
+    fi
+
+    # 3) 确认它真把任务勾掉了，没勾就是没进展，避免死循环
+    #
+    # 看的是「勾掉的有没有变多」，不是「剩下的有没有变少」。
+    # 因为做任务时发现新问题、往清单里补一条，是好事，不是没进展；
+    # 按剩余数判断的话，勾掉 1 条 + 新增 1 条 = 剩余不变 = 被误判成卡住。
+    # 第一次真跑第9步就撞上了：它写完函数、勾了任务、还老实记下
+    # "check.sh 探测不到 src/ 里的代码"这个新发现，结果被报成"没变化"。
+    local done_after; done_after="$(tasks_done)"
+    if [ "$done_after" -le "$done_before" ]; then
+      warn "检查过了但任务清单没变化。"
+      say  "卡住的任务：$task"
+      say  ""
+      say  "两种可能，先看一眼最新日志（.loop/log/ 里最新那个）再定："
+      say  "  1. 它确实做完了只是忘了勾 → 手动在 docs/07-任务清单.md 里勾掉，再 ./loop.sh go"
+      say  "  2. 这条其实得你本人来（它在日志里问了你问题） → 你答完再勾"
+      say  "     顺手在这条任务前面加上「【需要你回答】」，以后就会直接停下来问你，不会白跑一趟"
+      return 1
+    fi
+
+    # 4) 双回路转了没有。
+    #
+    # 见了实物就必须回头问一句「有没有哪条标准要改」——这是这套东西
+    # 跟同类工具唯一的区别，也是「像人一样复盘迭代」这句话的落地。
+    # 只更新东西、不更新标准的系统，会非常高效地跑向一个错的地方，
+    # 而且每一步验收都通过。所以这一条和「任务有没有勾掉」一样是硬检查。
+    if [ -f "$STANDARDS_FILE" ]; then
+      local rev_after; rev_after="$(revisions_count)"
+      if [ "$rev_after" -le "$rev_before" ]; then
+        rule
+        warn "这一轮没有回头看标准，不算跑完整。"
+        say  "做完一个任务、见到真东西之后，必须回答一句：${C_BOLD}有没有哪条标准要改？${C_OFF}"
+        say  ""
+        say  "去 ${C_BOLD}docs/03-什么算好.md${C_OFF} 末尾的「标准修订记录」补一行——"
+        say  "  改了 → 记：原来那条是什么、改成什么、为什么"
+        say  "  没改 → 也记一行「看过，没改」，${C_DIM}空着才是问题${C_OFF}"
+        say  ""
+        say  "补完再跑 ${C_BOLD}./loop.sh go${C_OFF} 继续。"
+        rule
+        return 1
+      fi
+    fi
+
+    local still; still="$(tasks_open)"
+    if [ "$still" -gt "$open" ]; then
+      ok "完成（剩 $still 个任务——比刚才多了，因为它顺手记下了新发现的问题）"
+    else
+      ok "完成（剩 $still 个任务）"
+    fi
+  done
+}
+
+# ============================================================
+# 子命令
+# ============================================================
+
+cmd_start() {
+  local goal="${1:-}"
+  [ -n "$goal" ] || die '用法：./loop.sh start "你想做的事，一句话就行"'
+
+  mkdir -p "$STATE_DIR" "$LOG_DIR" "$DOC_DIR"
+  printf '%s\n' "$goal" > "$STATE_DIR/原始想法.txt"
+
+  # 学习笔记要先建出来，第9步才有地方往里追加
+  if [ ! -f "$DOC_DIR/学习笔记.md" ]; then
+    cat > "$DOC_DIR/学习笔记.md" <<'EOF'
+# 学习笔记
+
+做的过程中遇到的技术名词，都会顺手记在这里。
+不用专门学，攒着就行——等这个项目做完，你大概就懂个七七八八了。
+
+EOF
+  fi
+
+  state_set stage 听懂
+  ok "记下了：$goal"
+  say "${C_DIM}第一件事不是开工，是先把你这句话拆开、听懂。它可能要问你几个问题。${C_OFF}"
+  cmd_go
+}
+
+cmd_go() {
+  # 结项之后就不往下跑了。没有出口的止损线，人会一直答"还没到"。
+  if [ "$(state_get closed no)" = "yes" ]; then
+    warn "这个项目已经结项了，复盘在 docs/99-结项.md。"
+    say  "真要重开：${C_BOLD}./loop.sh reset${C_OFF}（会先自动备份）"
+    return 1
+  fi
+
+  local stage; stage="$(state_get stage goal)"
+
+  if [ "$stage" = "done" ]; then
+    title "已经全部做完了 🎉"
+    say "想加新功能就跑：./loop.sh start \"新的想法\"（会另起一轮）"
+    return 0
+  fi
+
+  # 需要你点头的阶段：如果这一步已经跑过、且还没确认过，那这次 go 就是你的"确认"，往下走。
+  # 注意用 ran_ 标记而不是"文档在不在"来判断——上一轮遗留的旧文档会让整步被误跳过。
+  # 反过来也要防一手：状态说"跑过了"、该产出的文件却不在。
+  # 这种对不上的状态是旧版本留下的（那时候只要跑完就标成功，不看有没有产出）。
+  # 不拦的话，这次 go 会被当成你"确认了这一步"，等于让你确认一份不存在的文件，
+  # 后面每一步都建立在空气上。发现对不上就把标记清掉，重跑这一步。
+  if stage_needs_signoff "$stage" && [ "$(state_get "ran_$stage" no)" = "yes" ]; then
+    local sdoc; sdoc="$(stage_doc "$stage")"
+    if [ -n "$sdoc" ] && [ ! -f "$sdoc" ]; then
+      warn "状态里记着这一步跑过了，但 $(basename "$sdoc") 不在。"
+      say  "这是旧版本留下的错状态（那时候跑完就算成功，不看有没有产出）。"
+      say  "按「没跑过」处理，重跑这一步。"
+      rule
+      state_set "ran_$stage" no
+    fi
+  fi
+
+  # 第1步是引导式的，可能要问你好几轮。
+  #
+  # 它自己没在文档里写「状态：听懂了」之前，再敲一次 go 不算你点头——
+  # 不拦的话，下面那段会把这次 go 当成确认，直接溜进第1步，
+  # 而它其实还没听懂。后面八步就全建立在一个误解上了。
+  #
+  # 这时候 go 只把问题再显示一遍，【不重跑】：重跑要花钱，
+  # 而且你没给新信息，再问一轮只会得到一模一样的问题。
+  # 要往前走就答一句：./loop.sh 答 "..."
+  if [ "$stage" = "听懂" ] \
+     && [ "$(state_get ran_听懂 no)" = "yes" ] \
+     && [ "$(listen_state)" != "听懂了" ]; then
+    listen_gate
+    return 2
+  fi
+
+  if stage_needs_signoff "$stage" \
+     && [ "$(state_get "ran_$stage" no)" = "yes" ] \
+     && [ "$(state_get "signoff_$stage" no)" = "no" ]; then
+    state_set "signoff_$stage" yes
+    ok "已确认「$(stage_label "$stage")」"
+    state_set stage "$(next_stage "$stage")"
+    cmd_go
+    return
+  fi
+
+  if [ "$stage" = "build" ]; then
+    local rc=0
+    run_build_loop || rc=$?
+    [ "$rc" -eq 0 ] || return "$rc"
+    state_set stage done
+    title "全部做完了 🎉"
+    say "接下来可以跑 ./loop.sh explain 让它讲一遍你现在拥有的是个什么东西、怎么用。"
+    return 0
+  fi
+
+  local rc=0
+  run_stage "$stage" || rc=$?
+  [ "$rc" -eq 3 ] && return 0     # 没装 claude，已经提示手动执行了
+  # 这一步没做成（比如查不了资料、没产出该产出的文件）就停在这儿。
+  # 不停的话，后面每一步都建立在空气上，而且每步看着都是 ✓。
+  [ "$rc" -ne 0 ] && return "$rc"
+
+  # 「听懂」是唯一一个可能要跑好几轮的阶段。
+  # 它自己在文档里写「状态：听懂了 / 还没听懂」，我们照着它的话决定停不停。
+  if [ "$stage" = "听懂" ] && [ "$(listen_state)" != "听懂了" ]; then
+    listen_gate
+    return 2
+  fi
+
+  if stage_needs_signoff "$stage"; then
+    signoff_gate "$stage"
+    return 0
+  fi
+
+  state_set stage "$(next_stage "$stage")"
+  cmd_go   # 不需要点头的，直接连着往下跑
+}
+
+# 它还没听懂，要问你几个问题。把问题直接打出来，别让你去翻文件。
+listen_gate() {
+  local round; round="$(listen_round)"
+  local maxr="$LISTEN_MAX_ROUNDS"
+
+  rule
+  if [ "$round" -ge "$maxr" ]; then
+    title "问了 $round 轮，还是没聊拢"
+    say "${C_DIM}这通常不是问题问得不对，是这个想法本身还没成形。它在文件末尾给了你三条路。${C_OFF}"
+    say ""
+    printf '%s\n' "$(listen_questions)"
+    rule
+    return 0
+  fi
+
+  # 一次只给一个。剩下的等这个答完再说。
+  local total done_n idx
+  total="$(listen_q_count)"; done_n="$(listen_answered)"; idx=$((done_n + 1))
+
+  if [ "$total" -eq 0 ]; then
+    title "它还没听懂，但也没问出问题来"
+    say "${C_DIM}看看它写了什么：${LISTEN_FILE#"$ROOT/"}${C_OFF}"
+    say "想推它一把：${C_BOLD}./loop.sh 答 \"你想补充的话\"${C_OFF}"
+    rule
+    return 0
+  fi
+
+  title "有一件事它不许替你猜"
+  [ "$total" -gt 1 ] && say "${C_DIM}第 $idx 个，共 $total 个。答完这个再给下一个——一次只想一件事就行。${C_OFF}"
+  say ""
+  printf '%s\n' "$(listen_q_nth "$idx")"
+  rule
+  say "怎么答：${C_BOLD}./loop.sh 答 \"A\"${C_OFF}　${C_DIM}或者写句话，怎么顺手怎么来${C_OFF}"
+  say ""
+  say "${C_DIM}答不上来就直说「这个我答不上来」——那本身就是有用的信息，不是不合格的回答。${C_OFF}"
+  rule
+}
+
+# 回答第1步的问题，然后自动跑下一轮
+cmd_answer() {
+  local text="${1:-}"
+  [ -n "$text" ] || die '用法：./loop.sh 答 "1A 2C 3 我其实更在意的是…"'
+  [ -f "$LISTEN_FILE" ] || die "还没有要回答的东西。先跑 ./loop.sh start \"你的想法\""
+
+  local round total done_n idx
+  round="$(listen_round)"; total="$(listen_q_count)"
+  done_n="$(listen_answered)"; idx=$((done_n + 1))
+
+  # 把回答记在它对应的那个问题下面，不然回头看不出你答的是哪一题
+  {
+    if [ "$total" -gt 0 ] && [ "$idx" -le "$total" ]; then
+      printf '\n## 你的回答 · 第 %s 轮 · 问题 %s\n\n' "$round" "$idx"
+    else
+      printf '\n## 你的回答（第 %s 轮）\n\n' "$round"
+    fi
+    printf '%s\n' "$text"
+  } >> "$LISTEN_FILE"
+  listen_answered_set "$idx"
+  ok "记下了。"
+
+  # 同一轮里还有没答的，就在本地接着问下一个——【不重跑 AI】。
+  #
+  # 为什么：三个问题重跑三次，就是花三次钱换同一件事。
+  # 问题都是这一轮一起生成的，答完再一起送回去，让它重新听一遍就够了。
+  if [ "$total" -gt 0 ] && [ "$idx" -lt "$total" ]; then
+    rule
+    title "记下了。下一个 —— 第 $((idx+1)) 个，共 $total 个"
+    say ""
+    printf '%s\n' "$(listen_q_nth "$((idx+1))")"
+    rule
+    say "怎么答：${C_BOLD}./loop.sh 答 \"A\"${C_OFF}"
+    rule
+    return 0
+  fi
+
+  say "${C_DIM}都答完了，让它再听一遍。${C_OFF}"
+  rule
+  state_set ran_听懂 no      # 这一轮要重跑，清掉「跑过了」的标记
+  cmd_go
+}
+
+# 单独用：不开项目，只把一段话拆一遍，结果打在屏幕上。
+#
+# 为什么要有这个：用户要的是一个「基础的分析语言智能体」，
+# 那它就该能脱离主流程单独调用——不是只能在开项目的时候用一次。
+cmd_listen_once() {
+  local text="${1:-}"
+  [ -n "$text" ] || die '用法：./loop.sh 听 "你想说的一段话"'
+  have_claude || die "这台机器上没装 claude，跑不了。"
+
+  local tmp="$STATE_DIR/听一次.md"
+  mkdir -p "$STATE_DIR"
+  {
+    cat "$CMD_DIR/听懂.md"
+    printf '\n\n---- 这次要听的话（不写文件，直接把结果说给我听）----\n'
+    printf '%s\n' "$text"
+    printf '\n注意：这次【不要】写任何文件，直接把上面那个结构打出来给我看。\n'
+  } > "$tmp"
+
+  title "拆一段话"
+  rule
+  claude_run "$tmp"
+}
+
+cmd_status() {
+  local stage; stage="$(state_get stage goal)"
+  title "现在的进度"
+  say "原始想法：$(cat "$STATE_DIR/原始想法.txt" 2>/dev/null || echo '（还没开始）')"
+  say ""
+  local s mark
+  for s in "${STAGES[@]}"; do
+    [ "$s" = "done" ] && continue
+    local si ci; si="$(stage_index "$s")"; ci="$(stage_index "$stage")"
+    if [ "$stage" = "done" ] || [ "$si" -lt "$ci" ]; then mark="${C_GREEN}✓${C_OFF}"
+    elif [ "$si" -eq "$ci" ]; then mark="${C_YELLOW}▶${C_OFF}"
+    else mark="${C_DIM}·${C_OFF}"; fi
+    printf '  %s %s\n' "$mark" "$(stage_label "$s")"
+  done
+  if [ -f "$TASKS_FILE" ]; then
+    say ""
+    say "任务：$(tasks_done)/$(tasks_total) 已完成"
+  fi
+  say ""
+  say "${C_DIM}继续：./loop.sh go${C_OFF}"
+}
+
+cmd_explain() {
+  [ -f "$CMD_DIR/explain.md" ] || die "缺少 .claude/commands/explain.md"
+  local ctx=() s d
+  for s in "${STAGES[@]}"; do
+    d="$(stage_doc "$s")"
+    [ -n "$d" ] && [ -f "$d" ] && ctx+=("$d")
+  done
+  [ -f "$STATE_DIR/last-check.txt" ] && ctx+=("$STATE_DIR/last-check.txt")
+  claude_run "$CMD_DIR/explain.md" "${ctx[@]+"${ctx[@]}"}" || true
+}
+
+# 执行总监干的两件事：把 CEO 的决策拆成活（派单）、定今天谁做什么（排班）。
+#
+# 为什么要中间这一层：CEO 定「做什么、为什么」，总监定「谁做、什么时候、什么算完」。
+# 没有这一层，CEO 得亲自盯每个人每天干什么——那不叫操盘手，那叫工头。
+_run_director() {
+  local what="$1" cmd="$2" out="$3"
+  [ -f "$CMD_DIR/$cmd.md" ] || die "缺少 .claude/commands/$cmd.md"
+  if [ ! -f "$(role_file 执行总监)" ]; then
+    warn "还没有执行总监这个角色。"
+    say  "招他：${C_BOLD}./loop.sh hire 执行总监${C_OFF}"
+    return 1
+  fi
+
+  title "$what"
+  say "${C_DIM}在岗员工：$(roles_list | tr '\n' ' ')${C_OFF}"
+  rule
+
+  local ctx=()
+  [ -f "$DOC_DIR/09-操盘记录.md" ] && ctx+=("$DOC_DIR/09-操盘记录.md")
+  [ -f "$TASKS_FILE" ]            && ctx+=("$TASKS_FILE")
+  [ -f "$DOC_DIR/11-派工单.md" ]  && ctx+=("$DOC_DIR/11-派工单.md")
+  [ -f "$DOC_DIR/12-排班.md" ]    && ctx+=("$DOC_DIR/12-排班.md")
+
+  # 在岗名单要喂进去，否则会派给不存在的人
+  local roster="$STATE_DIR/在岗名单.md"
+  { printf '# 现在在岗的人（只能派给这些人）\n\n'; roles_list | sed 's/^/- /'; } > "$roster"
+  ctx+=("$roster")
+
+  local rc=0
+  ROLE_ISOLATED=1 ask_role 执行总监 "$(cat "$CMD_DIR/$cmd.md")" "${ctx[@]+"${ctx[@]}"}" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  if [ "$rc" -ne 0 ]; then report_failure "$rc" "$what 的时候出错了"; return $?; fi
+
+  group_say "执行总监" "$(tail -40 "$LAST_LOG" 2>/dev/null)"
+  rule
+  if [ -f "$DOC_DIR/$out" ]; then
+    ok "写好了：${C_BOLD}docs/$out${C_OFF}"
+  else
+    warn "没产出 docs/$out，按没做成处理。"
+    return 1
+  fi
+}
+
+cmd_dispatch() { _run_director "派单 · 把 CEO 的决策拆成每个人的活" 派单 "11-派工单.md"; }
+cmd_roster()   { _run_director "排班 · 今天每个人做什么" 排班 "12-排班.md"; }
+
+# 看板：从真实状态生成一个本地 HTML，双击就开。
+#
+# 为什么是本地 HTML 不是网页服务：这套东西是你机器上的一个脚本，没有常驻服务。
+# 生成一个自包含的 .html，零依赖、断网能用、不会挂。想刷新就再跑一次。
+# 它只读状态、不写任何东西——看板坏了不影响 loop 跑。
+cmd_board_html() {
+  command -v python3 >/dev/null 2>&1 || {
+    warn "看板要用 python3 生成，这台机器上没有。"
+    say  "不影响跑 loop，只是没有可视化。装个 python3 就有了。"
+    return 1
+  }
+  local out; out="$(python3 "$ROOT/scripts/看板.py" "$ROOT")" || {
+    warn "看板没生成成功。"; return 1; }
+  ok "看板好了：${C_BOLD}${out#"$ROOT/"}${C_OFF}"
+  say "${C_DIM}双击打开就行。想刷新再跑一次 ./loop.sh 看板${C_OFF}"
+  # 能自动打开就自动打开
+  if   command -v open    >/dev/null 2>&1; then open "$out" 2>/dev/null || true
+  elif command -v xdg-open>/dev/null 2>&1; then xdg-open "$out" 2>/dev/null || true
+  elif command -v explorer.exe >/dev/null 2>&1; then explorer.exe "$(basename "$out")" 2>/dev/null || true
+  fi
+}
+
+# CEO 设计专家团：先想清楚这个项目缺哪几块判断，再照缺口去找人。
+#
+# 为什么这一步必须有：行业专家擅长查，但他不知道这个项目缺什么。
+# 不给方向，他会按惯性去找"这行最有名的人"——
+# 而最有名的人 ≠ 对我们最有用的人。
+# 实测教训：没有这一步，找回来的全是网红，有故事没体系，
+# 成功还高度依赖那个年代的平台红利，拿到手根本没法用。
+cmd_panel_design() {
+  [ -f "$CMD_DIR/专家团.md" ] || die "缺少 .claude/commands/专家团.md"
+  title "CEO 设计专家团"
+  say "${C_DIM}先定缺哪几块判断，再照缺口点名要什么样的专家${C_OFF}"
+  rule
+
+  local ctx=()
+  [ -f "$DOC_DIR/00-目标.md" ]      && ctx+=("$DOC_DIR/00-目标.md")
+  [ -f "$DOC_DIR/02-共性与独特.md" ] && ctx+=("$DOC_DIR/02-共性与独特.md")
+  [ -f "$DOC_DIR/05-我不懂的.md" ]   && ctx+=("$DOC_DIR/05-我不懂的.md")
+  [ -f "$GROUP_CHAT" ]              && ctx+=("$GROUP_CHAT")
+
+  local rc=0
+  claude_run "$CMD_DIR/专家团.md" "${ctx[@]+"${ctx[@]}"}" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  if [ "$rc" -ne 0 ]; then report_failure "$rc" "设计专家团的时候出错了"; return $?; fi
+
+  rule
+  if [ -f "$DOC_DIR/13-专家团设计.md" ]; then
+    ok "写好了：${C_BOLD}docs/13-专家团设计.md${C_OFF}"
+    group_say "CEO" "$(tail -25 "$LAST_LOG" 2>/dev/null)"
+    say ""
+    say "下一步：${C_BOLD}./loop.sh 行业报告 \"<议题>\"${C_OFF}（行业专家会照这份设计去找人）"
+  else
+    warn "没产出 docs/13-专家团设计.md，按没做成处理。"
+    return 1
+  fi
+}
+
+# 蒸馏：把行业报告里的真实专家，做成可以单独提问的智能体。
+#
+# 【这件事唯一可能翻车的地方】蒸馏 ≠ 把这个人复活。
+# 「某某会说 XXX」是编的，而且借了真人的权威，比普通编造更糟。
+# 蒸馏出来的角色必须写死：超出他公开说过的部分，
+# 当场标明「这是从他的方法推的，他本人没这么说过」。
+cmd_distill() {
+  [ -f "$CMD_DIR/蒸馏.md" ] || die "缺少 .claude/commands/蒸馏.md"
+  local rpt; rpt="$(ls -t "$(role_workspace 行业专家)"/*行业报告.md 2>/dev/null | head -1)"
+  if [ -z "$rpt" ]; then
+    warn "还没有行业报告，没东西可蒸馏。"
+    say  "先跑：${C_BOLD}./loop.sh 行业报告 \"你的行业／议题\"${C_OFF}"
+    return 1
+  fi
+
+  title "蒸馏专家"
+  say "${C_DIM}原料：${rpt#"$ROOT/"}${C_OFF}"
+  rule
+
+  local before; before="$(roles_list | grep -c '^专家-' || true)"
+  local rc=0
+  claude_run "$CMD_DIR/蒸馏.md" "$rpt" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  if [ "$rc" -ne 0 ]; then report_failure "$rc" "蒸馏的时候出错了"; return $?; fi
+
+  local after; after="$(roles_list | grep -c '^专家-' || true)"
+  rule
+  if [ "$after" -gt "$before" ]; then
+    ok "蒸馏出 $((after-before)) 位："
+    roles_list | grep '^专家-' | sed 's/^/    /'
+    group_say "系统" "蒸馏了 $((after-before)) 位行业专家，他们能看到这之后的群聊。"
+    say ""
+    say "单独问：${C_BOLD}./loop.sh ask 专家-<名字> \"问题\"${C_OFF}"
+    say "一起议：${C_BOLD}./loop.sh 专家群 \"议题\"${C_OFF}"
+    say "用完封存：${C_BOLD}./loop.sh 封存 专家-<名字>${C_OFF}"
+  else
+    warn "没有新增任何专家角色，按没蒸馏成处理。"
+    return 1
+  fi
+}
+
+# 专家群：让蒸馏出来的专家依次就同一个议题发言，后面的看得见前面的。
+#
+# 为什么是依次不是同时：依次的好处是后面的人能反驳前面的，
+# 那才叫讨论；同时问只是拿到几份互不相干的独白。
+cmd_expert_panel() {
+  local topic="${1:-}"
+  [ -n "$topic" ] || die "用法：./loop.sh 专家群 \"要议什么\""
+  local experts; experts="$(roles_list | grep '^专家-' || true)"
+  if [ -z "$experts" ]; then
+    warn "还没有蒸馏出任何专家。"
+    say  "先跑：${C_BOLD}./loop.sh 行业报告 \"…\"${C_OFF} 然后 ${C_BOLD}./loop.sh 蒸馏${C_OFF}"
+    return 1
+  fi
+
+  title "专家群讨论：$topic"
+  say "${C_DIM}在场：$(printf '%s' "$experts" | tr '\n' ' ')${C_OFF}"
+  rule
+  group_say "CEO" "【专家群议题】$topic"
+
+  local who n=0
+  while IFS= read -r who; do
+    [ -z "$who" ] && continue
+    budget_ok || { warn "预算到顶，讨论中断。已经发言的都在群聊里。"; break; }
+    n=$((n+1))
+    rule
+    info "第 $n 位 · $who"
+
+    local q="【专家群讨论】$topic
+
+**先看群聊里前面几位说了什么。** 你是第 $n 位发言的。
+
+必须包含：
+1. **他明确说过的**（带出处）
+2. **从他的方法推的**（他本人没说过，标清楚）
+3. **条件对不对得上**：我们现在的处境跟他当年差在哪，这条建议[能直接用／要打折／用不了]
+4. **他最可能看走眼的地方**
+5. **如果你不同意前面某位的说法，直接点名说哪位、哪一条、为什么**
+   —— 这一条最重要。**都点头的讨论等于没讨论。**"
+
+    local ctx=(); local d
+    while IFS= read -r d; do [ -n "$d" ] && ctx+=("$d"); done < <(role_context "$who")
+    local rc=0
+    ROLE_ISOLATED=1 ask_role "$who" "$q" "${ctx[@]+"${ctx[@]}"}" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      group_say "$who" "$(tail -35 "$LAST_LOG" 2>/dev/null)"
+    else
+      warn "$who 这一轮没答成，跳过。"
+    fi
+  done <<< "$experts"
+
+  [ "$n" -eq 0 ] && { warn "一位都没发言成。"; return 1; }
+  rule
+  ok "$n 位发言完毕，全在 ${C_BOLD}docs/10-群聊.md${C_OFF}"
+  say "让 CEO 裁决：${C_BOLD}./loop.sh ceo${C_OFF}"
+}
+
+# 封存：这个角色用完了，收起来。不删——收进 .loop/封存/，随时能起复。
+cmd_archive_role() {
+  local who="${1:-}"
+  if [ -z "$who" ]; then
+    title "封存过的角色"
+    if [ -d "$STATE_DIR/封存" ]; then
+      find "$STATE_DIR/封存" -maxdepth 1 -name '*.md' -exec basename {} .md \; 2>/dev/null | sed 's/^/  /'
+    else
+      say "  还没封存过谁"
+    fi
+    say ""
+    say "封存：${C_BOLD}./loop.sh 封存 <名字>${C_OFF}　起复：${C_BOLD}./loop.sh 起复 <名字>${C_OFF}"
+    return 0
+  fi
+  [ -f "$(role_file "$who")" ] || die "「$who」不在岗（看看有谁：./loop.sh roles）"
+  mkdir -p "$STATE_DIR/封存"
+  mv "$(role_file "$who")" "$STATE_DIR/封存/$who.md"
+  [ -f "$(role_session "$who")" ] && mv "$(role_session "$who")" "$STATE_DIR/封存/$who.session"
+  ok "封存了：$who"
+  say "${C_DIM}没删。他说过的话还在群聊里，交付物还在 work/$who/，随时能起复。${C_OFF}"
+  group_say "系统" "$who 已封存。"
+}
+
+cmd_unarchive_role() {
+  local who="${1:-}"
+  [ -n "$who" ] || die "用法：./loop.sh 起复 <名字>"
+  [ -f "$STATE_DIR/封存/$who.md" ] || die "封存里没有「$who」"
+  mkdir -p "$ROLE_DIR"
+  mv "$STATE_DIR/封存/$who.md" "$(role_file "$who")"
+  [ -f "$STATE_DIR/封存/$who.session" ] && mv "$STATE_DIR/封存/$who.session" "$(role_session "$who")"
+  ok "起复了：$who"
+  group_say "系统" "$who 起复归队。"
+}
+
+# 行业报告：让行业专家去找 10 个真实操盘手的判断，一人一份落盘，最后综合。
+#
+# 跟「会诊」的区别：会诊是问我们自己的参谋；这个是去外面找【真人的战绩和说法】。
+# 关键是可追溯——一人一份单独写，带出处和时间，
+# 这样老板能回头核对"这个人说的跟网上搜到的案例对不对得上"。
+# 揉成一锅粥就没法核对了，那才是最危险的：读起来很专业，一句都验不了。
+cmd_industry() {
+  local topic="${1:-}"
+  [ -n "$topic" ] || die "用法：./loop.sh 行业报告 \"哪个行业／什么议题\""
+  if [ ! -f "$(role_file 行业专家)" ]; then
+    warn "还没有行业专家这个角色。"
+    say  "招他：${C_BOLD}./loop.sh hire 行业专家${C_OFF}"
+    return 1
+  fi
+
+  local ws; ws="$(role_workspace 行业专家)"; mkdir -p "$ws"
+  local stamp; stamp="$(date +%Y%m%d-%H%M%S)"
+  local deliver="$ws/$stamp-行业报告.md"
+  local id; id="$(task_add 行业专家 "行业报告：$topic" "${deliver#"$ROOT/"}")"
+
+  title "行业报告（第 $id 号）：$topic"
+  say "${C_DIM}目标 10 份实战判断，一人一份落盘带出处；找不够就明写找不够${C_OFF}"
+  rule
+  group_say "CEO → @行业专家" "【行业报告】$topic"$'\n\n'"交到：\`${deliver#"$ROOT/"}\`"
+
+  # 【不喂项目文档】行业报告的议题经常跟当前项目无关——
+  # 你可能正在为下一个方向做调研。喂项目文档的后果实测过：
+  # 它读完一堆微信工具的文档，跑去汇报那个项目的进度，
+  # 完全没做该做的行业报告。上下文不是越多越好，喂错了会把人带沟里。
+  # CEO 的专家团设计如果有，就是你的作业单——照单去找，别自由发挥
+  local ctx=()
+  if [ -f "$DOC_DIR/13-专家团设计.md" ]; then
+    cp "$DOC_DIR/13-专家团设计.md" "$ws/【作业单】专家团设计.md"
+    ctx+=("$ws/【作业单】专家团设计.md")
+    say "${C_DIM}照 CEO 的专家团设计去找（docs/13-专家团设计.md）${C_OFF}"
+  fi
+  local instruction; instruction="$(cat <<EOF
+【这是一份行业报告的活。照你角色定义里的五步做，一步都不许省。】
+
+## 如果附了【作业单】专家团设计
+**那是 CEO 定的，照单去找，别自由发挥。**
+里面写了这个项目缺哪几块判断、每一类要找什么样的人、明确不要什么。
+**「明确不要」那一栏尤其要守住**——找回来一堆不要的，等于白花钱。
+
+议题：$topic
+
+## 先说清楚：这个议题跟当前项目可能没关系
+你现在做的是【对这个议题所在行业】的调研，**不是汇报任何项目的进度**。
+群聊里那些别的项目的事，跟这份报告无关，别提。
+
+## 交付物
+写到这个文件：$stamp-行业报告.md（就在你当前所在的目录，直接写文件名即可）
+**必须是这个文件本身**——只在对话里说一遍不算交付。
+
+## 一人一份，不许揉在一起
+这份报告的全部价值在于【可追溯】：老板要能回头核对
+"这个人说的，跟网上能搜到的案例对不对得上"。
+**揉成一锅粥就没法核对了**——那才是最危险的：读起来很专业，一句都验不了。
+
+## 最后必须自己说一句
+「找到 __ 份够格的（目标 10），__ 份背景存疑，__ 份来自失败方。
+　够不够支撑一次不可逆的决定：[够 ／ 不够，还缺 ____]」
+
+**不够就说不够。** 一份只找到 3 个人、全是活着的报告，
+不足以支撑花大钱的决定——你自己说出来，别让 CEO 事后发现。
+
+干完在群里汇报三行：找到几份／最值得看的是谁为什么／哪一条你自己都觉得可疑。
+EOF
+)"
+
+  local rc=0
+  # NO_GROUP_CHAT=1：群聊里全是别的项目的事，会把它带跑偏（实测过）
+  # 在行业专家自己的工作区里跑，不在项目根目录——
+  # 项目根目录有 CLAUDE.md，会把它拽去做项目的活（实测两次都跑偏）
+  NO_GROUP_CHAT=1 ROLE_ISOLATED=1 ROLE_CWD="$ws" \
+    ask_role 行业专家 "$instruction" "${ctx[@]+"${ctx[@]}"}" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  if [ "$rc" -ne 0 ]; then report_failure "$rc" "做行业报告的时候出错了"; return $?; fi
+
+  group_say "行业专家" "$(tail -40 "$LAST_LOG" 2>/dev/null)"
+
+  rule
+  if [ -f "$deliver" ]; then
+    task_set_state "$id" "干完了"
+    local n; n="$(grep -c '^### 第' "$deliver" 2>/dev/null || echo 0)"
+    ok "交了：${C_BOLD}${deliver#"$ROOT/"}${C_OFF}（$(wc -l < "$deliver") 行，$n 份单独落盘的专家判断）"
+    say "让 CEO 看：${C_BOLD}./loop.sh 验收${C_OFF}　或直接裁决：${C_BOLD}./loop.sh ceo${C_OFF}"
+  else
+    task_set_state "$id" "没交东西"
+    warn "他说完了，但 ${deliver#"$ROOT/"} 不在——按【没交】处理。"
+    return 1
+  fi
+}
+
+# 会诊：CEO 判断该问谁 → 逐个问 → CEO 综合裁决。
+#
+# 这是组织架构里「CEO 咨询专家再裁决」那一段。
+# 关键是 CEO 自己点名，不是全问——全问十个人要十几次调用、几十美元，
+# 而且大部分人对某个具体议题给不出增量意见。
+# 挑人本身就是判断力的一部分，把它自动化掉等于把判断推给了流程。
+cmd_council() {
+  local topic="${1:-}"
+  [ -n "$topic" ] || die "用法：./loop.sh 会诊 \"要议什么\""
+  [ -f "$CMD_DIR/点名.md" ] || die "缺少 .claude/commands/点名.md"
+  local onstaff; onstaff="$(roles_list | tr '\n' ' ')"
+  [ -n "$onstaff" ] || { warn "还没招人。先 ./loop.sh hire 战略 财务 风控"; return 1; }
+
+  title "会诊：$topic"
+  say "${C_DIM}在岗：$onstaff${C_OFF}"
+  rule
+  group_say "你" "【会诊议题】$topic"
+
+  # ── 第一步：CEO 点名 ────────────────────────────────
+  info "第一步 · CEO 判断该问谁"
+  local pick_prompt="$STATE_DIR/点名.md"
+  { cat "$CMD_DIR/点名.md"
+    printf '\n\n## 现在在岗的人\n%s\n\n## 要会诊的议题\n%s\n' "$onstaff" "$topic"
+  } > "$pick_prompt"
+
+  local rc=0
+  claude_run "$pick_prompt" "$DOC_DIR/00-目标.md" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  if [ "$rc" -ne 0 ]; then report_failure "$rc" "点名的时候出错了"; return $?; fi
+
+  # || true：CEO 要是没照格式写「点名：」，grep 返回 1 + pipefail 会把脚本打死，
+  # 下面那句 if [ -z "$picked" ] 根本执行不到——而那句本来就是为这种情况写的。
+  local picked; picked="$(grep -oE '^点名[:：].*' "$LAST_LOG" | tail -1 | sed -E 's/^点名(:|：)[[:space:]]*//' || true)"
+  if [ -z "$picked" ]; then
+    rule
+    warn "CEO 没点名（要么它觉得这事不用会诊，要么它没照格式写）。"
+    say  "上面是它的说法。要硬会诊就直接 ./loop.sh ask <名字> \"$topic\""
+    return 1
+  fi
+
+  rule
+  ok "CEO 点了：${C_BOLD}$picked${C_OFF}"
+  group_say "CEO" "这个议题我点这几个人：$picked"
+
+  # ── 第二步：逐个问 ──────────────────────────────────
+  local n=0 who
+  for who in $picked; do
+    if [ ! -f "$(role_file "$who")" ]; then
+      warn "「$who」不在岗，跳过。（招他：./loop.sh hire $who）"
+      continue
+    fi
+    budget_ok || { warn "预算到顶，会诊中断。已经问过的意见都在群聊里。"; break; }
+    n=$((n+1))
+    # 用位置参数数个数，不用 wc -w —— wc -w 数不了中文（实测返回 0），
+    # 而这套东西的角色名全是中文。
+    local total; total="$(set -- $picked; echo $#)"
+    rule
+    info "第二步 · 问「$who」（$n/$total）"
+
+    local q="【会诊】$topic
+
+这是一次会诊，不是闲聊。**先看群聊里别人已经说了什么**，
+然后只说你这个位置上、别人给不出的那部分。
+
+必须包含：
+1. 结论先行（一句话）
+2. 依据（能核对的，带来源和日期；查不到就写查不到）
+3. 置信度：高／中／低
+4. **反对你自己的最强论据**——这条不写，你的意见对 CEO 没有价值
+5. 如果你不同意群里已有的某条判断，直接点名说哪条、为什么"
+
+    local ctx=(); local d
+    while IFS= read -r d; do [ -n "$d" ] && ctx+=("$d"); done < <(role_context "$who")
+    group_say "CEO → @$who" "【会诊】$topic"
+    rc=0
+    ROLE_ISOLATED=1 ask_role "$who" "$q" "${ctx[@]+"${ctx[@]}"}" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      group_say "$who" "$(tail -40 "$LAST_LOG" 2>/dev/null)"
+    else
+      warn "「$who」这一轮没答成，跳过。"
+    fi
+  done
+
+  [ "$n" -eq 0 ] && { warn "一个人都没问成，会诊没开起来。"; return 1; }
+
+  # ── 第三步：CEO 裁决 ────────────────────────────────
+  rule
+  info "第三步 · CEO 综合裁决"
+  budget_ok || { warn "预算到顶，没跑裁决。专家意见都在群聊里，可以之后跑 ./loop.sh ceo"; return 1; }
+  cmd_ceo
+}
+
+# 派活给某个角色：他自己去搜、去做，交付一个文件，等 CEO 验收。
+#
+# 跟 ask 的区别：ask 是问一句答一句；派活是「他独立干完一件事并交东西」。
+# 交付物必须是文件——**说了 ≠ 交了**，这是这套东西反复栽过的那个坑。
+cmd_assign() {
+  local role="${1:-}" task="${2:-}"
+  [ -n "$role" ] || die "用法：./loop.sh 派活 <角色> \"要他干什么\""
+  [ -f "$(role_file "$role")" ] || {
+    warn "没有「$role」这个角色。现有的：$(roles_list | tr '\n' ' ')"
+    say  "招人：./loop.sh hire"; exit 1; }
+  [ -n "$task" ] || die "要他干什么？用法：./loop.sh 派活 $role \"任务\""
+
+  local ws; ws="$(role_workspace "$role")"
+  mkdir -p "$ws"
+  local stamp; stamp="$(date +%Y%m%d-%H%M%S)"
+  local deliver="$ws/$stamp-交付.md"
+
+  local id; id="$(task_add "$role" "$task" "${deliver#"$ROOT/"}")"
+
+  title "派活给「$role」（第 $id 号）"
+  say "${C_DIM}$task${C_OFF}"
+  say "${C_DIM}他的工作区：${ws#"$ROOT/"}/${C_OFF}"
+  rule
+
+  group_say "你 → @$role" "【派活 #$id】$task"$'\n\n'"交到：\`${deliver#"$ROOT/"}\`"
+
+  local ctx=(); local d
+  while IFS= read -r d; do [ -n "$d" ] && ctx+=("$d"); done < <(role_context "$role")
+
+  local instruction; instruction="$(cat <<EOF
+【这是一件派给你的活，不是问你一句话。你要自己去查、去做，最后交一个文件。】
+
+任务：$task
+
+## 你的工作区
+$ws/
+搜集的资料、草稿、中间产物，全部放这个目录里。这是**你自己的地盘**，别人不会动。
+
+## 你的交付物
+写到这个文件：$deliver
+
+**交付物必须是这个文件本身**。只在对话里说一遍不算交付——
+这套东西反复栽在同一个坑上：**说了 ≠ 交了，跑过 ≠ 跑成了**。
+
+## 项目文档是只读的
+\`docs/\` 下的文件是大家共同的事实基础，**你只能读，不许改**。
+你觉得哪份文档写错了，写进交付物里说明理由，让 CEO 判断，别自己动手改。
+
+## 交付物里必须有这几段
+1. **结论先行**：一句话说清你做出了什么／得出了什么
+2. **过程**：你查了什么、从哪查的（带链接和日期）
+3. **不确定的地方**：哪些是查证的，哪些是推断的，哪些是猜的
+4. **验收怎么验**：CEO 拿什么标准判断你这活干得行不行——你自己先说
+5. **卡住的地方**：有就写，没有写"没卡住"
+
+干完之后在群里说一句话汇报（三行以内：做完了什么／最要紧的一条发现／要 CEO 定什么）。
+EOF
+)"
+
+  # 干活开全新会话：一件活 = 一个自包含任务包。
+  # 十件活堆在同一个会话里会越干越贵，而且第一件活里的错误假设
+  # 会一直粘着往后走。干活的持久化靠交付物，不靠"记住"。
+  local rc=0
+  ROLE_ISOLATED=1 ask_role "$role" "$instruction" "${ctx[@]+"${ctx[@]}"}" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  if [ "$rc" -ne 0 ]; then report_failure "$rc" "「$role」干活的时候出错了"; return $?; fi
+
+  group_say "$role" "$(tail -40 "$LAST_LOG" 2>/dev/null)"
+
+  # 交付物在不在，决定这活算不算干完 —— 说了 ≠ 交了
+  rule
+  if [ -f "$deliver" ]; then
+    task_set_state "$id" "干完了"
+    ok "交了：${C_BOLD}${deliver#"$ROOT/"}${C_OFF}（$(wc -l < "$deliver") 行）"
+    say "让 CEO 验收：${C_BOLD}./loop.sh 验收${C_OFF}"
+  else
+    task_set_state "$id" "没交东西"
+    warn "他说完了，但 ${deliver#"$ROOT/"} 不在——按【没交】处理。"
+    say  "看看他到底卡在哪：${LAST_LOG#"$ROOT/"}"
+    say  "或者直接再派一次，把任务说得更具体。"
+    return 1
+  fi
+}
+
+# CEO 验收：把干完的活逐个看一遍，判行不行
+cmd_review() {
+  [ -f "$CMD_DIR/review.md" ] || die "缺少 .claude/commands/review.md"
+  local pending; pending="$(tasks_pending_review)"
+  if [ -z "$pending" ]; then
+    title "没有等着验收的活"
+    say "派活：${C_BOLD}./loop.sh 派活 <角色> \"任务\"${C_OFF}"
+    say "看台账：${C_BOLD}./loop.sh 台账${C_OFF}"
+    return 0
+  fi
+
+  title "CEO 验收"
+  printf '%s\n' "$pending" | awk -F'\t' '{printf "  #%s  %-8s %s\n", $1, $2, substr($3,1,44)}'
+  rule
+
+  local ctx=() f
+  while IFS= read -r f; do
+    f="$(printf '%s' "$f" | cut -f5)"
+    [ -n "$f" ] && [ -f "$ROOT/$f" ] && ctx+=("$ROOT/$f")
+  done <<< "$pending"
+  [ -f "$STANDARDS_FILE" ] && ctx+=("$STANDARDS_FILE")
+  [ -f "$DOC_DIR/00-目标.md" ] && ctx+=("$DOC_DIR/00-目标.md")
+
+  local rc=0
+  claude_run "$CMD_DIR/review.md" "${ctx[@]+"${ctx[@]}"}" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  if [ "$rc" -ne 0 ]; then report_failure "$rc" "验收的时候出错了"; return $?; fi
+
+  group_say "CEO" "$(tail -50 "$LAST_LOG" 2>/dev/null)"
+  rule
+  say "验收结论已进群聊。${C_DIM}通过的自己去台账里改成「过了」，打回的重新派活。${C_OFF}"
+  say "台账：${C_BOLD}./loop.sh 台账${C_OFF}"
+}
+
+# 看台账：谁手上有什么活、干完没有、验收没有
+cmd_board() {
+  if [ ! -f "$TASK_LOG" ]; then
+    title "还没派过活"
+    say "派活：${C_BOLD}./loop.sh 派活 <角色> \"任务\"${C_OFF}"
+    return 0
+  fi
+  title "派活台账"
+  awk -F'\t' 'NR>1 {printf "  #%-3s %-8s %-7s %s\n", $1, $2, $4, substr($3,1,46)}' "$TASK_LOG"
+  say ""
+  awk -F'\t' 'NR>1 {c[$4]++} END {for (k in c) printf "  %s %d 件\n", k, c[k]}' "$TASK_LOG"
+}
+
+# 设/看预算上限
+cmd_budget() {
+  local v="${1:-}"
+  if [ -z "$v" ]; then
+    local b; b="$(budget_get)"
+    title "预算"
+    if [ -z "$b" ]; then
+      say "还没设上限。${C_DIM}没上限的话 ./loop.sh auto 不会启动——那等于装个不封顶的水龙头。${C_OFF}"
+    else
+      say "上限 \$$b，已经花了 \$$(cost_total)"
+    fi
+    say ""
+    say "设上限：${C_BOLD}./loop.sh budget 50${C_OFF}（单位是美元）"
+    return 0
+  fi
+  case "$v" in ''|*[!0-9.]*) die "预算要写数字，比如 ./loop.sh budget 50" ;; esac
+  state_set budget "$v"
+  ok "预算上限设成 \$$v（已经花了 \$$(cost_total)）"
+}
+
+# 无人值守：自己一直往下跑，撞到闸门/预算/卡点就停。
+#
+# 为什么必须先有预算才让跑：实测一次调用 $0.68~$8.20。
+# 没有上限的自动循环，是一个你睡着之后还在花钱的东西。
+cmd_auto() {
+  local b; b="$(budget_get)"
+  if [ -z "$b" ]; then
+    rule
+    warn "还没设预算上限，不给跑自动。"
+    say  "实测一次调用 \$0.68~\$8.20。没上限的无人值守，等于装了个不封顶的水龙头——"
+    say  "你睡着了它还在花钱。"
+    say  ""
+    say  "先设一个你真能接受的数：${C_BOLD}./loop.sh budget 50${C_OFF}"
+    rule
+    return 1
+  fi
+
+  local start; start="$(cost_total)"
+  title "无人值守开始"
+  say "${C_DIM}预算上限 \$$b，已花 \$$start。撞到下面任何一条就停：${C_OFF}"
+  say "${C_DIM}  预算到顶 ／ 轮到你拍板 ／ 轮到你干活 ／ 卡住了 ／ 全部做完${C_OFF}"
+  rule
+
+  local prev="" cur rc n=0
+  while :; do
+    n=$((n+1))
+    [ "$n" -gt "${LOOP_AUTO_MAX:-40}" ] && { warn "跑了 $((n-1)) 轮，先停下喘口气。"; break; }
+
+    budget_ok || break
+    cur="$(state_get stage goal)"
+    [ "$cur" = "done" ] && { ok "全部做完了。"; break; }
+
+    rc=0; cmd_go || rc=$?
+    local now; now="$(state_get stage goal)"
+
+    case "$rc" in
+      2) rule; info "停在这儿等你——上面写了要你做什么。"; break ;;
+      3) break ;;
+      0) : ;;
+      *) rule; warn "卡住了，停下（退出码 $rc）。"; break ;;
+    esac
+
+    # 阶段没动、上一轮也没动 → 空转，别烧钱
+    if [ "$now" = "$cur" ] && [ "$cur" = "$prev" ]; then
+      warn "连着两轮卡在同一步没动，停下，不空转。"
+      break
+    fi
+    prev="$cur"
+  done
+
+  rule
+  local endc; endc="$(cost_total)"
+  title "这一轮无人值守结束"
+  say "  跑了 $n 轮，花了 \$$(awk -v a="$endc" -v s="$start" 'BEGIN{printf "%.2f", a-s}')（累计 \$$endc / 上限 \$$b）"
+  say "  现在在：$(stage_label "$(state_get stage goal)")"
+}
+
+# 结项：这个项目到头了——不管是做成了，还是该停了。
+#
+# 为什么要有这个：止损线每次都在问「到了吗」，但「到了」之后没有出口。
+# 没有出口的止损线，人会一直答"还没到"。
+cmd_close() {
+  local doc="$DOC_DIR/99-结项.md"
+  [ -f "$doc" ] && { warn "已经结过项了：${doc#"$ROOT/"}"; return 0; }
+  [ -f "$CMD_DIR/close.md" ] || die "缺少 .claude/commands/close.md"
+
+  rule
+  title "结项"
+  say "这会把这个项目封存，并且写一份诚实的复盘："
+  say "  ${C_BOLD}做成了没有 ／ 花了多少 ／ 为什么到这儿为止 ／ 下次不再犯的是什么${C_OFF}"
+  say ""
+  say "${C_DIM}封存之后 go / auto 都不会再往下跑。想重开就 ./loop.sh reset。${C_OFF}"
+  rule
+
+  local ctx=() s d
+  for s in "${STAGES[@]}"; do
+    d="$(stage_doc "$s")"; [ -n "$d" ] && [ -f "$d" ] && ctx+=("$d")
+  done
+  [ -f "$GROUP_CHAT" ] && ctx+=("$GROUP_CHAT")
+  [ -f "$DOC_DIR/09-操盘记录.md" ] && ctx+=("$DOC_DIR/09-操盘记录.md")
+  [ -f "$COST_LOG" ] && ctx+=("$COST_LOG")
+
+  claude_run "$CMD_DIR/close.md" "${ctx[@]+"${ctx[@]}"}" || true
+
+  if [ -f "$doc" ]; then
+    state_set closed yes
+    group_say "系统" "项目已结项。复盘写在 docs/99-结项.md。"
+    rule
+    ok "结项了。复盘在 ${C_BOLD}${doc#"$ROOT/"}${C_OFF}"
+    say "${C_DIM}那份复盘值得过半年再看一遍——教训的保质期比结论长。${C_OFF}"
+  else
+    warn "没有产出 99-结项.md，按没结成处理，项目还开着。"
+    return 1
+  fi
+}
+
+# 从模板招一批人进来。不写名字就列出有哪些可招。
+#
+# 为什么是"按需招"而不是"一次全建"：实测一次调用 $0.68~$8.20，
+# 十个专家各出一份意见书就是十几次调用。
+# 全员开大会不是气派，是烧钱——CEO 该判断这件事问谁，而不是问所有人。
+cmd_hire() {
+  local pool="$ROOT/roles-模板"
+  [ -d "$pool" ] || die "找不到角色模板目录：roles-模板/"
+
+  if [ "$#" -eq 0 ] || [ -z "${1:-}" ]; then
+    title "组织架构：你 → CEO → 两个分支"
+    say ""
+    say "  ${C_DIM}CEO（./loop.sh ceo）不用招，它一直在。${C_OFF}"
+    say ""
+    local layer f n desc
+    for layer in 参谋 执行; do
+      if [ "$layer" = "参谋" ]; then
+        printf '  %s左分支 · 参谋层%s %s——CEO 咨询他们，只出意见书，不指挥执行%s\n' \
+          "$C_BOLD" "$C_OFF" "$C_DIM" "$C_OFF"
+      else
+        printf '\n  %s右分支 · 执行层%s %s——CEO 派单给执行总监，总监再拆给下面的人%s\n' \
+          "$C_BOLD" "$C_OFF" "$C_DIM" "$C_OFF"
+      fi
+      # 执行总监是右分支的头，排最前面；其余按名字排
+      local files; files="$(ls "$pool"/*.md)"
+      [ "$layer" = "执行" ] && files="$pool/执行总监.md
+$(ls "$pool"/*.md | grep -v /执行总监.md)"
+      # 参谋层里有几种类型（常驻／大师／镜子／审美），常驻的排前面。
+      # 类型是已有的字段，看板也在用它——这里只是把它显示出来，没加新机制。
+      local pass typ
+      for pass in 常驻 大师 镜子 审美; do
+        for f in $files; do
+          n="$(basename "$f" .md)"
+          grep -q "^层：$layer" "$f" 2>/dev/null || continue
+          # || true 不能省：grep 没匹配到会返回 1，配上文件开头的
+          # set -euo pipefail（pipefail 让整条管道也返回 1），整个脚本会当场退出。
+          # 老角色文件没有「类型：」这一行，就是这么把 hire 整个打死的。
+          typ="$(grep -m1 '^类型：' "$f" 2>/dev/null | sed 's/^类型：//' || true)"
+          [ -z "$typ" ] && typ=常驻
+          [ "$layer" = "参谋" ] && [ "$typ" != "$pass" ] && continue
+          [ "$layer" = "执行" ] && [ "$pass" != "常驻" ] && continue
+          desc="$(grep -m1 '^一句话：' "$f" | sed 's/^一句话：//' || true)"
+          local tag=""
+          [ "$typ" != "常驻" ] && tag="${C_BLUE}[$typ]${C_OFF} "
+          if [ -f "$(role_file "$n")" ]; then
+            printf '    %s%s%s %s%s %s在岗%s\n' \
+              "$C_BOLD" "$(pad "$n" 14)" "$C_OFF" "$tag" "$desc" "$C_GREEN" "$C_OFF"
+          else
+            printf '    %s %s%s\n' "$(pad "$n" 14)" "$tag" "$desc"
+          fi
+        done
+      done
+    done
+    say ""
+    say "招人：${C_BOLD}./loop.sh hire 战略 财务 风控${C_OFF}"
+    say "${C_DIM}别一次全招——一次会诊十几次调用，实测一次 \$0.68~\$8.20。让 CEO 判断该问谁。${C_OFF}"
+    return 0
+  fi
+
+  mkdir -p "$ROLE_DIR"
+  local n hired=0
+  for n in "$@"; do
+    [ -z "$n" ] && continue
+    if [ ! -f "$pool/$n.md" ]; then warn "没有「$n」这个模板（跑 ./loop.sh hire 看有哪些）"; continue; fi
+    if [ -f "$(role_file "$n")" ]; then say "  $n 已经在岗了，跳过"; continue; fi
+    cp "$pool/$n.md" "$(role_file "$n")"
+    ok "招了：$n"
+    hired=$((hired+1))
+  done
+  [ "$hired" -eq 0 ] && return 0
+
+  group_say "系统" "新来了 $hired 个人：$*。他们能看到这之后的群聊内容。"
+  say ""
+  say "问他们：${C_BOLD}./loop.sh ask <名字> \"问题\"${C_OFF}"
+  say "看看都有谁：${C_BOLD}./loop.sh roles${C_OFF}"
+}
+
+# 你在群里说一句话。所有角色下次说话前都会看到。
+cmd_say() {
+  local text="${1:-}"
+  [ -n "$text" ] || die "用法：./loop.sh say \"你想说的话\""
+  group_say "你" "$text"
+  ok "说了。所有角色下次开口前都会看到这句。"
+  say "${C_DIM}群聊：docs/10-群聊.md${C_OFF}"
+}
+
+# 花了多少钱、哪一步最贵
+#
+# 这个命令存在的理由很具体：这套东西两次撞上额度上限、白烧 5 次重试，
+# 而在此之前它对自己花了多少钱零可见性。撞上限那一刻才知道，已经晚了。
+cmd_cost() {
+  if [ ! -f "$COST_LOG" ]; then
+    title "还没有花钱记录"
+    if [ -z "$(json_parser)" ]; then
+      warn "这台机器上没有 jq 也没有 python3，记不了账。"
+      say  "不影响跑，只是看不到花了多少。装其中一个就能记。"
+    else
+      say "跑过 ./loop.sh go 之后就会有。"
+    fi
+    return 0
+  fi
+
+  title "花了多少钱"
+
+  # 总账
+  awk -F'\t' 'NR>1 && $3!="" { total += $3; secs += $4; n++ }
+    END {
+      if (n == 0) { print "  还没有有效记录"; exit }
+      printf "  一共 %d 次调用，花了 $%.2f，用时 %d 分钟，平均一次 $%.2f\n", n, total, secs/60, total/n
+    }' "$COST_LOG"
+
+  # 分项，按花得多的排前面。排序只作用在数据行，别把表头也排进去。
+  say ""
+  printf '  %-22s %9s %6s %10s\n' "哪一步" "花了" "次数" "平均一次"
+  awk -F'\t' 'NR>1 && $3!="" { cost[$2] += $3; cnt[$2]++ }
+    END { for (k in cost) printf "%.4f\t%s\t%d\n", cost[k], k, cnt[k] }' "$COST_LOG" \
+  | sort -rn \
+  | awk -F'\t' '{ printf "  %-22s %8.2f %6d %10.2f\n", $2, $1, $3, $1/$3 }'
+
+  # 走了别家接口的，这里的美元数是假的，必须当场说破。
+  #
+  # claude 报的 total_cost_usd 是按【Anthropic 价目表】算的。
+  # 走 DeepSeek 时它照报一个数，但它不知道 DeepSeek 收多少钱。
+  # 不标出来，账面上就是一笔看起来很正经的假账——那正是这套东西第2条不许干的事。
+  local other; other="$(awk -F'\t' 'NR>1 && $5!="" && $5!="官方" { c[$5]++ } END { for (k in c) printf "%s(%d次) ", k, c[k] }' "$COST_LOG")"
+  if [ -n "$other" ]; then
+    say ""
+    warn "上面有一部分不作数：$other"
+    say  "  ${C_DIM}这些走的不是官方接口，美元数是按官方价目表折算的，不是你真付的钱。"
+    say  "  真实花费去那家自己的后台看。哪几笔走的谁家，看 接口 那一列。${C_OFF}"
+  fi
+
+  say ""
+  # 跟目标预算对一下——光看花了多少没用，要看占预算多少
+  local budget; budget="$(grep -oE '¥?[0-9]+ *元?/ *月|每月[^0-9]*[0-9]+' "$DOC_DIR/00-目标.md" 2>/dev/null | head -1 || true)"
+  [ -n "$budget" ] && say "${C_DIM}你在 00-目标.md 里写的预算：$budget${C_OFF}"
+  say "${C_DIM}明细：${COST_LOG#"$ROOT/"}${C_OFF}"
+}
+
+# ---------- 接口：给每个员工换脑子 ----------
+#
+# 这条命令回答一个问题：这个员工，用谁家的 AI？
+#
+# 判断力省不得，体力活可以省。CEO 裁决、风控反证用最强的；
+# 客服分拣、竞品巡查、内容初稿用便宜的——**便宜的差价是几十倍，不是几倍。**
+provider_list_known() {
+  say ""
+  printf '  %s%s%s\n' "$(pad 代号 18)" "$(pad 是什么 26)" "查证日期"
+  local c
+  for c in 官方 deepseek deepseek-flash; do
+    local row; row="$(provider_row "$c")"
+    printf '  %s%s%s\n' \
+      "$(pad "$(echo "$row" | cut -d'|' -f1)" 18)" \
+      "$(pad "$(echo "$row" | cut -d'|' -f2)" 26)" \
+      "$(echo "$row" | cut -d'|' -f6)"
+  done
+}
+
+# 要钥匙。三个来源：命令行给的 → 环境变量里的 → 当场问。
+provider_need_key() {
+  local code="$1" given="${2:-}"
+  local fam; fam="$(provider_family "$code")"
+  [ -f "$(provider_keyfile "$code")" ] && [ -z "$given" ] && return 0
+
+  local key="$given"
+  if [ -z "$key" ]; then
+    case "$fam" in
+      deepseek) key="${DEEPSEEK_API_KEY:-}" ;;
+    esac
+  fi
+  if [ -z "$key" ] && [ -t 0 ]; then
+    say ""
+    say "要一把 ${C_BOLD}$fam${C_OFF} 的钥匙（API Key）。"
+    say "${C_DIM}去 platform.deepseek.com 后台自己建一把，形如 sk-xxxx。${C_OFF}"
+    printf '  贴在这儿（打字不显示，贴完回车）：'
+    read -r -s key; printf '\n'
+  fi
+  if [ -z "$key" ]; then
+    warn "没拿到钥匙，没法切。"
+    say  "两种给法："
+    say  "  ${C_BOLD}./loop.sh 接口 <员工> $code sk-你的key${C_OFF}"
+    say  "  ${C_BOLD}export DEEPSEEK_API_KEY=sk-你的key${C_OFF} 之后再跑一次"
+    return 1
+  fi
+  provider_save_key "$code" "$key"
+  ok "钥匙存好了：${C_DIM}$(provider_keyfile "$code" | sed "s|$ROOT/||")${C_OFF}（只有你能读，也不会进版本库）"
+  return 0
+}
+
+cmd_provider() {
+  local a1="${1:-}" a2="${2:-}" a3="${3:-}"
+
+  # 不带参数：一览表
+  if [ -z "$a1" ]; then
+    local rs; rs="$(roles_list)"
+    title "每个员工用谁家的脑子"
+    if [ -z "$rs" ]; then
+      warn "还一个员工都没招。先 ${C_BOLD}./loop.sh hire 客服 竞品${C_OFF}"
+    else
+      say ""
+      printf '  %s%s%s%s\n' "$(pad 员工 14)" "$(pad 层 8)" "$(pad 用谁家的 22)" "钥匙"
+      rule
+      local r
+      while IFS= read -r r; do
+        [ -z "$r" ] && continue
+        local p; p="$(role_provider "$r")"
+        local nm="官方" col="$C_DIM" ky=""
+        if [ "$p" != "官方" ]; then
+          nm="$(provider_field "$p" 2)"; col="$C_GREEN"
+          if [ -f "$(provider_keyfile "$p")" ]; then ky="有"
+          else ky="${C_RED}丢了 → ./loop.sh 接口 $r $p sk-你的key${C_OFF}"; fi
+        fi
+        printf '  %s%s%s%s%s %s\n' \
+          "$(pad "$r" 14)" "$(pad "$(role_layer "$r")" 8)" \
+          "$col" "$(pad "$nm" 22)" "$C_OFF" "$ky"
+      done <<< "$rs"
+    fi
+    provider_list_known
+    say ""
+    say "换一个人：      ${C_BOLD}./loop.sh 接口 客服 deepseek${C_OFF}"
+    say "换一整层：      ${C_BOLD}./loop.sh 接口 执行层 deepseek${C_OFF}"
+    say "换回官方：      ${C_BOLD}./loop.sh 接口 客服 官方${C_OFF}"
+    say "先验一下通不通：${C_BOLD}./loop.sh 接口 测 客服${C_OFF}"
+    say ""
+    say "${C_DIM}判断力省不得，体力活可以省——CEO/风控/战略留官方，客服/竞品/内容切便宜的。${C_OFF}"
+    return 0
+  fi
+
+  # 测：真打一次，看通不通、多久、多少钱
+  if [ "$a1" = "测" ] || [ "$a1" = "test" ]; then
+    local role="$a2"
+    [ -z "$role" ] && die "要说测谁：./loop.sh 接口 测 客服"
+    [ -f "$(role_file "$role")" ] || die "没有「$role」这个员工（./loop.sh roles 看都有谁）"
+    local p; p="$(role_provider "$role")"
+    title "测「$role」的接口：$(provider_field "$p" 2 2>/dev/null || echo "$p")"
+    say "${C_DIM}问他一句最短的话，只看通不通。${C_OFF}"
+    rule
+    local t0; t0="$(date +%s)"
+    local rc=0
+    NO_GROUP_CHAT=1 ROLE_ISOLATED=1 \
+      ask_role "$role" "只回四个字：接口通了。别的什么都不要说。" >/dev/null 2>&1 || rc=$?
+    local t1; t1="$(date +%s)"
+    rule
+    if [ "$rc" -ne 0 ]; then
+      warn "没通。"
+      say ""
+      say "它自己的原话："
+      say "${C_DIM}$(tail -6 "$LAST_LOG" 2>/dev/null || tail -6 "$LAST_LOG.err" 2>/dev/null)${C_OFF}"
+      say ""
+      say "最常见的三个原因："
+      say "  1. 钥匙不对或者过期了 → ${C_BOLD}./loop.sh 接口 $role $p sk-新的key${C_OFF}"
+      say "  2. 那家接口地址变了 → 去他家文档确认一下，改 $(role_env "$role" | sed "s|$ROOT/||")"
+      say "  3. 余额不够了 → 去他家后台看"
+      say ""
+      say "先切回官方把活干完：${C_BOLD}./loop.sh 接口 $role 官方${C_OFF}"
+      return 1
+    fi
+    ok "通了，用了 $((t1-t0)) 秒。"
+    say "  它回的：${C_DIM}$(tail -3 "$LAST_LOG" 2>/dev/null | tr -d '\n')${C_OFF}"
+    if [ "$p" != "官方" ]; then
+      say ""
+      warn "钱这一项要说清楚：账单里这几笔的美元数【不作数】。"
+      say  "  那个数是 claude 按 Anthropic 的价目表算的，它不知道 $p 收多少钱。"
+      say  "  ${C_BOLD}真实花费去 $p 自己的后台看。${C_OFF}台账里已经标了是谁家的。"
+    fi
+    return 0
+  fi
+
+  # 换：./loop.sh 接口 <员工|层> <代号> [key]
+  local who="$a1" code="$a2" key="$a3"
+  [ -z "$code" ] && die "要说换成谁家的：./loop.sh 接口 $who deepseek（跑 ./loop.sh 接口 看有哪几家）"
+  provider_row "$code" >/dev/null 2>&1 || {
+    warn "不认识「$code」这家。"
+    say "${C_DIM}这张表里只放查证过的——凭印象加一家进来，你照着配一次配不通，这功能就废了。${C_OFF}"
+    provider_list_known
+    say ""
+    say "要接表上没有的，自己写 ${C_BOLD}.loop/roles/<员工>.env${C_OFF}，"
+    say "格式看 ${C_BOLD}安装与落地.md${C_OFF} 第三节。"
+    return 1
+  }
+
+  # 谁：一个人 / 一整层 / 全部
+  local -a targets=()
+  case "$who" in
+    全部|all)
+      while IFS= read -r r; do [ -n "$r" ] && targets+=("$r"); done <<< "$(roles_list)" ;;
+    执行层|执行|右分支)
+      while IFS= read -r r; do
+        [ -n "$r" ] && [ "$(role_layer "$r")" = "执行" ] && targets+=("$r")
+      done <<< "$(roles_list)" ;;
+    参谋层|参谋|左分支)
+      while IFS= read -r r; do
+        [ -n "$r" ] && [ "$(role_layer "$r")" = "参谋" ] && targets+=("$r")
+      done <<< "$(roles_list)" ;;
+    *)
+      [ -f "$(role_file "$who")" ] || die "没有「$who」这个员工（./loop.sh roles 看都有谁）"
+      targets=("$who") ;;
+  esac
+  [ "${#targets[@]}" -eq 0 ] && die "「$who」这一层现在一个人都没有。先 ./loop.sh hire"
+
+  # 切回官方不用钥匙；切别家要
+  local url; url="$(provider_field "$code" 3)"
+  if [ -n "$url" ]; then
+    provider_need_key "$code" "$key" || return 1
+  fi
+
+  title "换脑子"
+  local r n=0
+  for r in "${targets[@]}"; do
+    local before; before="$(role_provider "$r")"
+    if provider_apply "$r" "$code"; then
+      local after; after="$(role_provider "$r")"
+      printf '  %s%s → %s%s%s\n' "$(pad "$r" 14)" "$before" "$C_GREEN" "$after" "$C_OFF"
+      n=$((n+1))
+    else
+      warn "  $r 没换成"
+    fi
+  done
+  say ""
+  ok "换了 $n 个人。${C_DIM}其他人一点没动。${C_OFF}"
+
+  if [ -n "$url" ]; then
+    say ""
+    say "${C_BOLD}下一步：先验一个，别一次全信。${C_OFF}"
+    say "  ${C_BOLD}./loop.sh 接口 测 ${targets[0]}${C_OFF}"
+    say ""
+    warn "还有一件事必须先说清楚：${C_BOLD}账单会不准。${C_OFF}"
+    say  "  ${C_DIM}claude 只会按 Anthropic 的价目表算钱，它不知道别家收多少。"
+    say  "  台账第5列标了每一笔走的谁家，真实花费去那家后台看。${C_OFF}"
+  fi
+  return 0
+}
+
+# ---------- 上线评审 ＋ 运营期 ----------
+#
+# 结构照搬「启蒙」那一套：一人一块、各自落盘、产物不在就是没交、可重跑。
+LAUNCH_FILE="$DOC_DIR/09-上线.md"
+LAUNCH_PANEL="${LAUNCH_PANEL:-营销大师 MVP大师 商业专家}"
+LEDGER="$STATE_DIR/账本.tsv"
+
+cmd_launch() {
+  [ -f "$BLUEPRINT_FILE" ] || die "先把蓝图画出来：./loop.sh 蓝图"
+  local b; b="$(budget_get)"
+  [ -z "$b" ] && { warn "先设个上限：./loop.sh budget 20"; return 1; }
+
+  local who
+  for who in $LAUNCH_PANEL; do
+    [ -f "$(role_file "$who")" ] || { mkdir -p "$ROLE_DIR"; cp "$ROOT/roles-模板/$who.md" "$(role_file "$who")"; }
+  done
+
+  title "上线评审"
+  say "${C_DIM}三个人各查一块，CEO 拍板能不能上。三道闸有一道不过就不许上。${C_OFF}"
+  rule
+
+  local ctx=("$BLUEPRINT_FILE")
+  local f
+  for f in "$DOC_DIR/00-目标.md" "$DOC_DIR/00-论证.md" "$LISTEN_FILE"; do
+    [ -f "$f" ] && ctx+=("$f")
+  done
+
+  for who in $LAUNCH_PANEL; do
+    local out; out="$WORK_DIR/$who/$( [ "$who" = 营销大师 ] && echo 方案 || { [ "$who" = MVP大师 ] && echo 砍完的 || echo 账; } ).md"
+    if [ -f "$out" ]; then say "  ${C_DIM}$who 已经交过了，跳过${C_OFF}"; continue; fi
+    mkdir -p "$(dirname "$out")"
+    info "  $who …"
+    local rc=0
+    NO_GROUP_CHAT=1 ROLE_ISOLATED=1 ROLE_CWD="$WORK_DIR/$who" \
+      ask_role "$who" "照你的规矩做一轮，写进 $out。每个数字标 [事实|推断|猜测]，能查的必须查。" \
+      "${ctx[@]}" >/dev/null 2>&1 || rc=$?
+    if [ -f "$out" ]; then ok "  $who 交了"; group_say "$who" "$(head -20 "$out")"
+    else warn "  $who 没交东西（退出码 $rc）"; fi
+  done
+
+  rule
+  title "CEO 拍板"
+  local actx=("${ctx[@]}")
+  for f in "$WORK_DIR"/营销大师/*.md "$WORK_DIR"/MVP大师/*.md "$WORK_DIR"/商业专家/*.md; do
+    [ -f "$f" ] && actx+=("$f")
+  done
+  [ -f "$ROOT/references/判断标准.md" ] && actx+=("$ROOT/references/判断标准.md")
+  local rc=0
+  claude_run "$CMD_DIR/上线评审.md" "${actx[@]}" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  if [ "$rc" -ne 0 ]; then report_failure "$rc" "上线评审出错了"; return $?; fi
+  [ -f "$LAUNCH_FILE" ] || { rule; warn "没产出 09-上线.md，按没做成处理。"; return 1; }
+
+  rule
+  ok "评审结果在 ${C_BOLD}${LAUNCH_FILE#"$ROOT/"}${C_OFF}"
+  awk '/^##[[:space:]]*上线前三道闸/ { on=1 } on && /^##[[:space:]]*需要你定/ { print; exit } on { print }' \
+    "$LAUNCH_FILE" 2>/dev/null | head -14
+  rule
+  say "${C_DIM}定止损线和投入：./loop.sh 止损 \"到6月还没有10个付费用户就停\"${C_OFF}"
+  say "${C_DIM}上线之后每天：./loop.sh 日报　　看仪表盘：./loop.sh 看板${C_OFF}"
+  rule
+}
+
+# 止损线 ＋ 投入 —— 他只需要定这两个
+cmd_stoploss() {
+  local text="${1:-}"
+  if [ -z "$text" ]; then
+    title "止损线"
+    say "现在：$(state_get 止损线 "${C_YELLOW}还没定${C_OFF}")"
+    say "投入上限：\$$(budget_get)"
+    say ""
+    say "定一条：${C_BOLD}./loop.sh 止损 \"到6月底还没有10个付费用户就停，然后改方向\"${C_OFF}"
+    say "${C_DIM}必须是【一个日期 ＋ 一个可数的事实】。没有出口的止损线，人会一直答"还没到"。${C_OFF}"
+    return 0
+  fi
+  state_set 止损线 "$text"
+  ok "记下了：$text"
+  say "${C_DIM}每天的日报会拿这条对一次，快到了会提前叫你。${C_OFF}"
+}
+
+# 记账 —— 收入支出，日报和仪表盘都读它
+cmd_ledger() {
+  local kind="${1:-}" amt="${2:-}" note="${3:-}"
+  if [ -z "$kind" ]; then
+    title "账本"
+    if [ -f "$LEDGER" ]; then
+      awk -F'\t' 'NR>1 { if ($2=="收") inc+=$3; else exp+=$3 }
+        END { printf "  收入 %.2f　支出 %.2f　净 %.2f\n", inc, exp, inc-exp }' "$LEDGER"
+      say ""; tail -8 "$LEDGER" | awk -F'\t' '{printf "  %s  %s %8s  %s\n",$1,$2,$3,$4}'
+    else say "  还没记过账"; fi
+    say ""
+    say "记一笔：${C_BOLD}./loop.sh 记账 收 500 \"第一单\"${C_OFF}　${C_BOLD}./loop.sh 记账 支 30 \"服务器\"${C_OFF}"
+    return 0
+  fi
+  case "$kind" in 收|支) ;; *) die "第一个参数只能是 收 或 支" ;; esac
+  [ -n "$amt" ] || die '用法：./loop.sh 记账 收 500 "第一单"'
+  mkdir -p "$STATE_DIR"
+  [ -f "$LEDGER" ] || printf '日期\t收支\t金额\t说明\n' > "$LEDGER"
+  printf '%s\t%s\t%s\t%s\n' "$(date '+%Y-%m-%d')" "$kind" "$amt" "$note" >> "$LEDGER"
+  ok "记下了：$kind $amt $note"
+}
+
+# 日报 —— 上线之后每天一份，他只看这个
+cmd_daily_report() {
+  [ -f "$LAUNCH_FILE" ] || die "还没上线。先跑 ./loop.sh 上线"
+  title "日报"
+  rule
+  local ctx=("$LAUNCH_FILE")
+  [ -f "$LEDGER" ] && ctx+=("$LEDGER")
+  [ -f "$DOC_DIR/10-群聊.md" ] && ctx+=("$DOC_DIR/10-群聊.md")
+
+  local tmp="$STATE_DIR/日报.md"
+  { printf '你是 CEO。给老板写今天的日报。\n\n'
+    printf '**他只看这一份，所以只写一页，写他能立刻做决定的东西。**\n'
+    printf '说话见 references/怎么说话.md：不许出现商业术语。\n\n'
+    printf '止损线：%s\n投入上限：$%s　已花：$%s\n\n' \
+      "$(state_get 止损线 '（还没定）')" "$(budget_get)" "$(cost_total)"
+    printf '格式：\n## 今天\n（一句话：好了还是坏了）\n\n'
+    printf '## 数\n收入__ 支出__ 净__ ｜ 离止损线还有__\n\n'
+    printf '## 要你拍板的\n（没有就写「没有，你不用管」）\n\n'
+    printf '## 我们明天干什么\n（三条以内）\n'
+  } > "$tmp"
+  local rc=0
+  claude_run "$tmp" "${ctx[@]}" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  [ "$rc" -ne 0 ] && { report_failure "$rc" "写日报的时候出错了"; return $?; }
+  rule
+  say "${C_DIM}完整仪表盘：./loop.sh 看板${C_OFF}"
+}
+
+# ---------- 启蒙：四位大师各说一块，拧成几个能选的方向 ----------
+#
+# 结构照搬「论证」那一套（lz_one 那个路子）：一人一块不重叠、
+# 各自落盘、产物不在就是没交、可重跑跳过已交的。不重造。
+ENLIGHT_FILE="$DOC_DIR/00-启蒙.md"
+MASTERS="${MASTERS:-美学大师 哲学大师 历史人文大师 精神意识大师}"
+
+cmd_enlighten() {
+  [ -f "$BLUEPRINT_FILE" ] || die "先把蓝图画出来：./loop.sh 蓝图"
+  local b; b="$(budget_get)"
+  [ -z "$b" ] && { warn "这一步要跑五次调用。先设个上限：./loop.sh budget 20"; return 1; }
+
+  local who
+  for who in $MASTERS; do
+    if [ ! -f "$(role_file "$who")" ]; then
+      [ -f "$ROOT/roles-模板/$who.md" ] || die "缺少 roles-模板/$who.md"
+      mkdir -p "$ROLE_DIR"; cp "$ROOT/roles-模板/$who.md" "$(role_file "$who")"
+    fi
+  done
+
+  title "启蒙 · 四位大师"
+  say "${C_DIM}一人只管一块，不重叠。最后拧成几个你能选的方向，具体到按钮。${C_OFF}"
+  rule
+
+  local ctx=("$BLUEPRINT_FILE")
+  local f
+  for f in "$LISTEN_FILE" "$DOC_DIR/00-镜子.md" "$AESTHETIC_FILE" "$DOC_DIR/00-论证.md"; do
+    [ -f "$f" ] && ctx+=("$f")
+  done
+  local kb; kb="$(kb_files)"
+  [ -n "$kb" ] && while IFS= read -r f; do [ -n "$f" ] && ctx+=("$f"); done <<< "$kb"
+
+  for who in $MASTERS; do
+    local out="$WORK_DIR/$who/启蒙.md"
+    if [ -f "$out" ]; then
+      say "  ${C_DIM}$who 已经交过了，跳过（想重跑就删掉 ${out#"$ROOT/"}）${C_OFF}"; continue
+    fi
+    mkdir -p "$(dirname "$out")"
+    info "  $who …"
+    local q
+    q="$(printf '%s\n' \
+      "照你那一块，给这个产品的形式和细节提判断。" \
+      "" \
+      "**每一条必须落到一个能做的决定上**，落不到的删掉。" \
+      "「要有人文关怀」不算，「删除不弹确认框，改成 5 秒撤销」才算。" \
+      "" \
+      "**每条判断挂出处**，能查的那种。查不到就说查不到，不许编。" \
+      "" \
+      "写进 $out：" \
+      "## 我这一块看到的" \
+      "## 具体到能做的决定（至少 3 条，每条带出处和代价）" \
+      "## 我最没把握的一条" )"
+    local rc=0
+    NO_GROUP_CHAT=1 ROLE_ISOLATED=1 ROLE_CWD="$WORK_DIR/$who" \
+      ask_role "$who" "$q" "${ctx[@]}" >/dev/null 2>&1 || rc=$?
+    if [ -f "$out" ]; then ok "  $who 交了"; group_say "$who" "$(head -20 "$out")"
+    else warn "  $who 没交东西（退出码 $rc）"; fi
+  done
+
+  rule
+  title "拧成方向"
+  local actx=("${ctx[@]}")
+  for who in $MASTERS; do
+    [ -f "$WORK_DIR/$who/启蒙.md" ] && actx+=("$WORK_DIR/$who/启蒙.md")
+  done
+  local rc=0
+  claude_run "$CMD_DIR/启蒙.md" "${actx[@]}" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  if [ "$rc" -ne 0 ]; then report_failure "$rc" "综合的时候出错了"; return $?; fi
+  [ -f "$ENLIGHT_FILE" ] || { rule; warn "没产出 00-启蒙.md，按没做成处理。"; return 1; }
+
+  rule
+  ok "方向在 ${C_BOLD}${ENLIGHT_FILE#"$ROOT/"}${C_OFF}"
+  say ""
+  say "${C_DIM}选一个：./loop.sh 改 \"我选 B\"　它会把这个方向并进蓝图${C_OFF}"
+  say "${C_DIM}四位大师的完整意见：work/<名字>/启蒙.md${C_OFF}"
+  rule
+}
+
+# ---------- 审美：给他看真东西，从他的选择里反推他的审美 ----------
+#
+# 不许问「你喜欢什么风格」——他答不上来，没人答得上来。
+# 他看到了能判断，闭着眼描述不出来，这是两回事。
+AESTHETIC_FILE="$DOC_DIR/00-审美.md"
+
+cmd_aesthetic() {
+  [ -f "$BLUEPRINT_FILE" ] || die "先把蓝图画出来：./loop.sh 蓝图"
+  if [ ! -f "$(role_file 前端审美)" ]; then
+    [ -f "$ROOT/roles-模板/前端审美.md" ] || die "缺少 roles-模板/前端审美.md"
+    mkdir -p "$ROLE_DIR"; cp "$ROOT/roles-模板/前端审美.md" "$(role_file 前端审美)"
+    ok "把前端审美专家请进来了"
+  fi
+
+  title "审美"
+  say "${C_DIM}不问你喜欢什么风格——给你看真东西，从你的选择里反推。${C_OFF}"
+  rule
+
+  local ctx=("$BLUEPRINT_FILE")
+  [ -f "$DOC_DIR/00-镜子.md" ] && ctx+=("$DOC_DIR/00-镜子.md")
+  [ -f "$AESTHETIC_FILE" ] && ctx+=("$AESTHETIC_FILE")
+  local kb; kb="$(kb_files)"
+  [ -n "$kb" ] && while IFS= read -r f; do [ -n "$f" ] && ctx+=("$f"); done <<< "$kb"
+
+  local q
+  q="$(printf '%s\n' \
+    "照你的规矩来一轮，写进 $AESTHETIC_FILE。" \
+    "" \
+    "**参照物必须联网查证，是他能当场打开看的真东西，带链接和查证日期。**" \
+    "凭印象说某个产品长什么样——你记忆里那一版可能是三年前的，人家早改了。" \
+    "" \
+    "三个方向，每个都要写到能想象出画面，而且都要有代价。" \
+    "然后只问他一个场景题（不问偏好），再加那道「一年后他朋友会怎么说」。" )"
+
+  local rc=0
+  ROLE_ISOLATED=1 ask_role 前端审美 "$q" "${ctx[@]}" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  if [ "$rc" -ne 0 ]; then report_failure "$rc" "挑审美的时候出错了"; return $?; fi
+  [ -f "$AESTHETIC_FILE" ] || { rule; warn "没产出 $(basename "$AESTHETIC_FILE")，按没做成处理。"; return 1; }
+
+  rule
+  ok "三个方向在 ${C_BOLD}${AESTHETIC_FILE#"$ROOT/"}${C_OFF}"
+  say ""
+  say "${C_DIM}挑一个：./loop.sh ask 前端审美 \"我选 B\"${C_OFF}"
+  say "${C_DIM}它会从你的选择里反推出一句你的审美标准，以后所有界面取舍都拿那句判。${C_OFF}"
+  rule
+}
+
+# ---------- 落地手册：一步一步带他做出来，含所有要花钱的点 ----------
+cmd_manual() {
+  [ -f "$BLUEPRINT_FILE" ] || die "先把蓝图画出来：./loop.sh 蓝图"
+  local b; b="$(budget_get)"
+  [ -z "$b" ] && { warn "这一步要联网查一堆价格。先设个上限：./loop.sh budget 20"; return 1; }
+
+  title "落地手册"
+  say "${C_DIM}一步一步、含所有要花钱的点。写给一个完全不会写代码的人看。${C_OFF}"
+  rule
+
+  local ctx=("$BLUEPRINT_FILE")
+  local f
+  for f in "$AESTHETIC_FILE" "$DOC_DIR/06-技术与落地.md" "$DOC_DIR/00-论证.md"; do
+    [ -f "$f" ] && ctx+=("$f")
+  done
+
+  local rc=0
+  claude_run "$CMD_DIR/落地手册.md" "${ctx[@]}" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  if [ "$rc" -ne 0 ]; then report_failure "$rc" "写手册的时候出错了"; return $?; fi
+  local out="$DOC_DIR/08-落地手册.md"
+  [ -f "$out" ] || { rule; warn "没产出 08-落地手册.md，按没做成处理。"; return 1; }
+
+  rule
+  ok "手册在 ${C_BOLD}${out#"$ROOT/"}${C_OFF}"
+  say ""
+  awk '/^##[[:space:]]*这事一共要花多少钱/ { on=1 } on && /^##[[:space:]]*上架/ { exit } on { print }' "$out" 2>/dev/null | head -24
+  rule
+  say "${C_DIM}里面有几条路可选，每条都写了代价和死法。选好了敲 ./loop.sh go${C_OFF}"
+  rule
+}
+
+# ---------- 蓝图：一直改到他说「对，这就是我要做的」 ----------
+#
+# 这是个【收敛循环】，跟第1步「听懂」用的是同一套机制（round_* 那几个）：
+#   它自己在文档里写「状态：还在改 / 就是它了」
+#   还在改 → 停下来问你一个问题，不往下走
+#   一次只问一个，同一轮的问题在本地走完，全答完了才回去重跑一轮
+#
+# 「就是它了」这四个字只有它听到你亲口说了那句话才准写。
+# 你说"挺好的""行吧"不算——那是客气，不是拍板。
+BLUEPRINT_FILE="$DOC_DIR/00-蓝图.md"
+BP_PROGRESS="$STATE_DIR/蓝图答题进度"
+BP_MAX_ROUNDS="${BP_MAX_ROUNDS:-12}"
+BP_QA='^##[[:space:]]*我想确认一件事'
+BP_QB='^##[[:space:]]*详细版'
+
+bp_state()    { round_state "$BLUEPRINT_FILE" 就是它了; }
+bp_round()    { round_num "$BLUEPRINT_FILE"; }
+bp_q_count()  { round_q_count "$BLUEPRINT_FILE" "$BP_QA" "$BP_QB"; }
+bp_q_nth()    { round_q_nth "$BLUEPRINT_FILE" "$BP_QA" "$BP_QB" "$1"; }
+bp_answered() { round_answered "$BP_PROGRESS" "$(bp_round)"; }
+
+# 老板自己的知识库/审美文档。有就喂进去，没有就跳过。
+# 这是预留的口子：以后他往 references/我的知识库/ 里丢什么，蓝图就会读什么。
+kb_files() {
+  local d="$ROOT/references/我的知识库"
+  [ -d "$d" ] || return 0
+  find "$d" -maxdepth 2 -type f \( -name '*.md' -o -name '*.txt' \) 2>/dev/null | sort
+}
+
+cmd_blueprint() {
+  [ -f "$LISTEN_FILE" ] || die "先跑第1步：./loop.sh start \"你想说的\""
+
+  local round; round="$(bp_round)"
+  if [ "$round" -ge "$BP_MAX_ROUNDS" ] && [ "$(bp_state)" != "到了" ]; then
+    rule
+    warn "改了 $round 轮还没定下来。"
+    say  "${C_DIM}这通常不是蓝图的问题，是方向本身还没定。回头看看 docs/00-镜子.md，"
+    say  "或者 ./loop.sh 照镜子 —— 有时候改不完，是因为要做的根本不是这个。${C_OFF}"
+    rule
+    return 2
+  fi
+
+  title "产品蓝图 · 第 $((round + 1)) 轮"
+  say "${C_DIM}一直改到你说「对，这就是我要做的」为止。${C_OFF}"
+  rule
+
+  local ctx=("$LISTEN_FILE")
+  local f
+  for f in "$DOC_DIR/00-目标.md" "$DOC_DIR/00-论证.md" "$DOC_DIR/00-镜子.md" \
+           "$DOC_DIR/03-什么算好.md" "$BLUEPRINT_FILE"; do
+    [ -f "$f" ] && ctx+=("$f")
+  done
+  local kb; kb="$(kb_files)"
+  if [ -n "$kb" ]; then
+    while IFS= read -r f; do [ -n "$f" ] && ctx+=("$f"); done <<< "$kb"
+    say "${C_DIM}读上了你自己的知识库（$(printf '%s\n' "$kb" | wc -l) 份）${C_OFF}"
+  fi
+
+  local rc=0
+  claude_run "$CMD_DIR/蓝图.md" "${ctx[@]}" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  if [ "$rc" -ne 0 ]; then report_failure "$rc" "画蓝图的时候出错了"; return $?; fi
+  [ -f "$BLUEPRINT_FILE" ] || { rule; warn "没产出 $(basename "$BLUEPRINT_FILE")，按没做成处理。"; return 1; }
+
+  bp_gate
+  [ "$(bp_state)" = "到了" ] && return 0 || return 2
+}
+
+bp_gate() {
+  rule
+  if [ "$(bp_state)" = "到了" ]; then
+    title "定了 🎉"
+    say "你说了「就是它了」，蓝图锁定。"
+    say ""
+    say "完整的在 ${C_BOLD}${BLUEPRINT_FILE#"$ROOT/"}${C_OFF}"
+    say "${C_DIM}想看细节：那份文档里「详细版」那一节——用户流程、技术路线、时间表、第一周每天做什么${C_OFF}"
+    say ""
+    say "接着往下：${C_BOLD}./loop.sh go${C_OFF}"
+    rule
+    return 0
+  fi
+
+  local total done_n idx
+  total="$(bp_q_count)"; done_n="$(bp_answered)"; idx=$((done_n + 1))
+  if [ "$total" -eq 0 ]; then
+    title "这一版画好了"
+    say "看看：${C_BOLD}${BLUEPRINT_FILE#"$ROOT/"}${C_OFF}"
+    say ""
+    say "${C_BOLD}对了就说一句：./loop.sh 定了${C_OFF}"
+    say "${C_DIM}要改就说哪儿不对：./loop.sh 改 \"这个方向不对，我其实想…\"${C_OFF}"
+    rule
+    return 0
+  fi
+
+  title "这一版画好了，有一件事想跟你确认"
+  [ "$total" -gt 1 ] && say "${C_DIM}第 $idx 个，共 $total 个。答完这个再给下一个。${C_OFF}"
+  say ""
+  printf '%s\n' "$(bp_q_nth "$idx")"
+  rule
+  say "回答：${C_BOLD}./loop.sh 改 \"A\"${C_OFF}　${C_DIM}或者直接说哪儿不对${C_OFF}"
+  say "${C_BOLD}已经对了就说：./loop.sh 定了${C_OFF}"
+  say ""
+  say "${C_DIM}完整蓝图（含详细版）：${BLUEPRINT_FILE#"$ROOT/"}${C_OFF}"
+  rule
+}
+
+# 回答蓝图的问题 / 说哪儿要改
+cmd_blueprint_answer() {
+  local text="${1:-}"
+  [ -n "$text" ] || die '用法：./loop.sh 改 "A" 或 ./loop.sh 改 "这个方向不对，我其实想…"'
+  [ -f "$BLUEPRINT_FILE" ] || die "还没有蓝图。先跑 ./loop.sh 蓝图"
+
+  local round total done_n idx
+  round="$(bp_round)"; total="$(bp_q_count)"
+  done_n="$(bp_answered)"; idx=$((done_n + 1))
+
+  {
+    if [ "$total" -gt 0 ] && [ "$idx" -le "$total" ]; then
+      printf '\n## 你的回答 · 第 %s 轮 · 问题 %s\n\n' "$round" "$idx"
+    else
+      printf '\n## 你说要改的（第 %s 轮）\n\n' "$round"
+    fi
+    printf '%s\n' "$text"
+  } >> "$BLUEPRINT_FILE"
+  round_answered_set "$BP_PROGRESS" "$round" "$idx"
+  ok "记下了。"
+
+  # 同一轮还有没答的，本地接着问，不重跑 AI（重跑一次就是多花一次钱）
+  if [ "$total" -gt 0 ] && [ "$idx" -lt "$total" ]; then
+    rule
+    title "下一个 —— 第 $((idx+1)) 个，共 $total 个"
+    say ""
+    printf '%s\n' "$(bp_q_nth "$((idx+1))")"
+    rule
+    say "回答：${C_BOLD}./loop.sh 改 \"A\"${C_OFF}　${C_BOLD}已经对了：./loop.sh 定了${C_OFF}"
+    rule
+    return 0
+  fi
+
+  say "${C_DIM}照你说的重画一版。${C_OFF}"
+  rule
+  cmd_blueprint
+}
+
+# 「对，这就是我要做的」——只有你亲口说，才算数
+cmd_blueprint_lock() {
+  [ -f "$BLUEPRINT_FILE" ] || die "还没有蓝图。先跑 ./loop.sh 蓝图"
+  {
+    printf '\n## 你拍板了（%s）\n\n' "$(date '+%Y-%m-%d %H:%M')"
+    printf '对，这就是我要做的。\n'
+  } >> "$BLUEPRINT_FILE"
+  # 状态行是它自己写的，这里只补一句机器读得到的，免得它下一轮又当没定
+  printf '\n状态：就是它了\n' >> "$BLUEPRINT_FILE"
+  rule
+  title "定了 🎉"
+  say "蓝图锁在 ${C_BOLD}${BLUEPRINT_FILE#"$ROOT/"}${C_OFF}"
+  say ""
+  say "${C_DIM}想看细节：那份文档里「详细版」那一节${C_OFF}"
+  say "接着往下：${C_BOLD}./loop.sh go${C_OFF}"
+  rule
+}
+
+# ---------- 照镜子：在动手之前，先看清他到底想要什么 ----------
+#
+# 为什么要有这一步：大多数项目不是死于做得不好，
+# 是死于【做的根本不是他真正想要的那个东西】——
+# 做到一半发现"我好像也没那么想要这个"，然后就停了。
+#
+# 这一步风险最高，因为心理层面的话最容易编、听起来最深刻、最没法核对。
+# 所以人生导师那份角色定义里写死了一条：
+# 每一句关于他的话，必须能指回他自己说过的原话。「你其实是……」一次都不许出现。
+MIRROR_FILE="$DOC_DIR/00-镜子.md"
+
+cmd_mirror() {
+  [ -f "$LISTEN_FILE" ] || die "先跑第1步把你的话拆开：./loop.sh start \"你想说的\""
+
+  if [ ! -f "$(role_file 人生导师)" ]; then
+    if [ -f "$ROOT/roles-模板/人生导师.md" ]; then
+      mkdir -p "$ROLE_DIR"
+      cp "$ROOT/roles-模板/人生导师.md" "$(role_file 人生导师)"
+      ok "把人生导师请进来了"
+    else
+      die "缺少 roles-模板/人生导师.md"
+    fi
+  fi
+
+  title "照镜子"
+  say "${C_DIM}不给建议，不下判断。只把你自己说过的话摆到你面前。${C_OFF}"
+  rule
+
+  local q
+  q="$(printf '%s\n' \
+    "读 docs/00-听到的.md 里他说的原话，还有他后面补充的回答。" \
+    "" \
+    "照你的规矩做一次镜子，写进 $MIRROR_FILE。" \
+    "" \
+    "**再说一遍那条死规矩**：每一句关于他的话，必须能指回他自己说过的原话。" \
+    "「你其实是……」这五个字一次都不许出现。" \
+    "" \
+    "第二节【只问一个问题】，给具体场景，不问抽象动机。" )"
+
+  local rc=0
+  NO_GROUP_CHAT=1 ROLE_ISOLATED=1 ask_role 人生导师 "$q" "$LISTEN_FILE" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  if [ "$rc" -ne 0 ]; then report_failure "$rc" "照镜子的时候出错了"; return $?; fi
+
+  if [ ! -f "$MIRROR_FILE" ]; then
+    rule
+    warn "没产出 $(basename "$MIRROR_FILE")，按没做成处理。"
+    return 1
+  fi
+
+  rule
+  ok "写在 ${C_BOLD}${MIRROR_FILE#"$ROOT/"}${C_OFF}"
+  say ""
+  say "${C_DIM}想接着聊：./loop.sh ask 人生导师 \"你的话\"${C_OFF}"
+  say "${C_DIM}聊完了回主线：./loop.sh go${C_OFF}"
+  say ""
+  say "${C_DIM}这一步是可选的，跳过不影响流程。${C_OFF}"
+  return 0
+}
+
+# ---------- 论证：十个专家把「这事到底成不成」查一遍 ----------
+#
+# 分两轮，这是这条命令的核心设计：
+#   先跑的四个【联网查】真实数据；后跑的六个【看着查回来的数据做判断】。
+#
+# 为什么不是十个人一起上：十个人各查各的，会得到十份互相打架的数字，
+# 而且没有裁判。先查后判，判断的人是看着【同一份】真实数据在判断。
+# 顺带还便宜——只有四个人要联网，联网那几次才是贵的。
+LUN_ZHENG_FILE="$DOC_DIR/00-论证.md"
+LZ_RESEARCH="${LZ_RESEARCH:-行研 增长 竞品 技术}"
+LZ_JUDGE="${LZ_JUDGE:-财务 战略 产品 合规 运营 风控}"
+
+lz_deliverable() { echo "$WORK_DIR/$1/论证.md"; }
+
+# 跑一个专家。已经交过东西的跳过——预算中途用完了能接着跑，不用从头来。
+lz_one() {
+  local who="$1" round="$2"; shift 2
+  local out; out="$(lz_deliverable "$who")"
+
+  if [ -f "$out" ]; then
+    say "  ${C_DIM}$who 已经交过了，跳过（想重跑就删掉 ${out#"$ROOT/"}）${C_OFF}"
+    return 0
+  fi
+  if [ ! -f "$(role_file "$who")" ]; then
+    warn "  「$who」不在岗，跳过。（招他：./loop.sh hire $who）"
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$out")"
+  local q
+  q="$(printf '%s\n' \
+    "读 docs/00-论证.md 里的作业单，找到写着【$who】的那一节。" \
+    "" \
+    "**你只答那一个问题。别人的活不许碰**——十个人各答各的，重叠了就等于没分工。" \
+    "" \
+    "$( [ "$round" = 查 ] \
+        && printf '%s' "你这一轮要【联网查真实数据】。查不到就写「查不到」，**绝对不许编**。每个数字必须带来源链接和日期。" \
+        || printf '%s' "先跑的几个人已经把真实数据查回来了（在上面的上下文里）。你这一轮【不用联网】，看着他们查回来的数据做判断。" )" \
+    "" \
+    "把结果写进 **$out**，格式：" \
+    "" \
+    "## 我负责的问题" \
+    "## 结论（一句话）" \
+    "## 依据" \
+    "　每条标 [事实|推断|猜测]。[事实] 必须有来源和日期，没有就降级成 [推断]。" \
+    "## 对应哪几条承重条件" \
+    "　写编号，并给出每条应该标成：已验证 / 未验证 / 已证伪" \
+    "## 我这份里最靠不住的一点" \
+    "　必写。一份看不出哪儿靠不住的意见书，是危险，不是专业。" )"
+
+  info "  $who …"
+  local rc=0
+  NO_GROUP_CHAT=1 ROLE_ISOLATED=1 ROLE_CWD="$WORK_DIR/$who" \
+    ask_role "$who" "$q" "$@" >/dev/null 2>&1 || rc=$?
+
+  # 「跑过」不等于「交了东西」。文件不在就是没交，不许记成功。
+  if [ -f "$out" ]; then
+    ok "  $who 交了"
+    group_say "$who" "$(head -25 "$out")"
+  else
+    warn "  $who 没交东西（退出码 $rc）"
+    local b; b="$(blocker_reason "$LAST_LOG" || true)"
+    [ -n "$b" ] && { say "  ${C_DIM}${b#*	}${C_OFF}"; return 2; }
+  fi
+  return 0
+}
+
+cmd_argue() {
+  [ -f "$DOC_DIR/00-目标.md" ] || die "得先有目标草案。跑 ./loop.sh go 把第2步跑出来。"
+
+  local missing=""
+  local who
+  for who in $LZ_RESEARCH $LZ_JUDGE; do
+    [ -f "$(role_file "$who")" ] || missing="$missing $who"
+  done
+  if [ -n "$missing" ]; then
+    rule
+    warn "论证团还差人：$missing"
+    say  "先招齐：${C_BOLD}./loop.sh hire$missing${C_OFF}"
+    say  ""
+    say  "${C_DIM}这一步是十个专家把「这事到底成不成」查一遍，人不齐就有盲区。${C_OFF}"
+    rule
+    return 1
+  fi
+
+  local b; b="$(budget_get)"
+  if [ -z "$b" ]; then
+    warn "这一步会调用十几次 AI，是这套东西里最贵的一步。"
+    say  "先设个上限：${C_BOLD}./loop.sh budget 30${C_OFF}　${C_DIM}（到顶会自动停，已经交的不会白跑）${C_OFF}"
+    return 1
+  fi
+
+  local start; start="$(cost_total)"
+
+  # ── 一、CEO 出作业单 ────────────────────────────────
+  if [ ! -f "$LUN_ZHENG_FILE" ]; then
+    title "论证 · 第一步：CEO 把议题拆成十个不重叠的窄问题"
+    rule
+    local rc=0
+    claude_run "$CMD_DIR/论证作业单.md" \
+      "$DOC_DIR/00-听到的.md" "$DOC_DIR/00-目标.md" || rc=$?
+    [ "$rc" -eq 3 ] && return 0
+    [ "$rc" -ne 0 ] && { report_failure "$rc" "出作业单的时候出错了"; return $?; }
+    [ -f "$LUN_ZHENG_FILE" ] || {
+      warn "没产出 $(basename "$LUN_ZHENG_FILE")，按没做成处理。"; return 1; }
+    ok "作业单出来了：${LUN_ZHENG_FILE#"$ROOT/"}"
+  else
+    say "${C_DIM}作业单已经有了，接着往下跑。${C_OFF}"
+  fi
+
+  local ctx=("$DOC_DIR/00-目标.md" "$LUN_ZHENG_FILE")
+  [ -f "$DOC_DIR/00-听到的.md" ] && ctx=("$DOC_DIR/00-听到的.md" "${ctx[@]}")
+
+  # ── 二、先跑：联网查真实数据 ────────────────────────
+  rule
+  title "论证 · 第二步：四个人去查真实数据（这几次要联网，是贵的那部分）"
+  for who in $LZ_RESEARCH; do
+    lz_one "$who" 查 "${ctx[@]}" || { warn "停在这儿了。恢复之后再跑一次 ./loop.sh 论证"; return 2; }
+  done
+
+  # ── 三、后跑：看着查回来的数据做判断 ────────────────
+  rule
+  title "论证 · 第三步：六个人看着这些数据做判断（不联网，便宜）"
+  local jctx=("${ctx[@]}")
+  for who in $LZ_RESEARCH; do
+    local d; d="$(lz_deliverable "$who")"
+    [ -f "$d" ] && jctx+=("$d")
+  done
+  for who in $LZ_JUDGE; do
+    lz_one "$who" 判 "${jctx[@]}" || { warn "停在这儿了。恢复之后再跑一次 ./loop.sh 论证"; return 2; }
+  done
+
+  # ── 四、CEO 综合，算可行性 ──────────────────────────
+  rule
+  title "论证 · 第四步：CEO 综合十份意见，算可行性"
+  local actx=("${jctx[@]}")
+  for who in $LZ_JUDGE; do
+    local d; d="$(lz_deliverable "$who")"
+    [ -f "$d" ] && actx+=("$d")
+  done
+  local rc=0
+  claude_run "$CMD_DIR/论证综合.md" "${actx[@]}" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  [ "$rc" -ne 0 ] && { report_failure "$rc" "综合的时候出错了"; return $?; }
+
+  # ── 五、把一页纸打给他看 ────────────────────────────
+  rule
+  local page; page="$(lz_onepager)"
+  if [ -n "$page" ]; then
+    printf '%s\n' "$page"
+  else
+    warn "没找到「给你的一页纸」那一节，完整的在 ${LUN_ZHENG_FILE#"$ROOT/"}"
+  fi
+  rule
+  local endc; endc="$(cost_total)"
+  say "这一轮花了 ${C_BOLD}\$$(awk -v a="$start" -v b="$endc" 'BEGIN{printf "%.2f", b-a}')${C_OFF}"
+  say "完整的十份意见：${C_BOLD}work/<名字>/论证.md${C_OFF}　汇总：${C_BOLD}${LUN_ZHENG_FILE#"$ROOT/"}${C_OFF}"
+  say ""
+  say "${C_DIM}想重跑某个人：删掉他那份 work/<名字>/论证.md，再跑一次 ./loop.sh 论证${C_OFF}"
+  return 0
+}
+
+# 把「给你的一页纸」那一节摘出来。问题和结论在文档中间，不摘的话人得自己翻。
+lz_onepager() {
+  [ -f "$LUN_ZHENG_FILE" ] || return 0
+  awk '/^##[[:space:]]*给你的一页纸/ { on=1 }
+       on && /^##[[:space:]]*承重条件核对表/ { exit }
+       on { print }' "$LUN_ZHENG_FILE" 2>/dev/null
+}
+
+# 看看现在都有哪些角色，各自聊过几次
+cmd_roles() {
+  local rs; rs="$(roles_list)"
+  if [ -z "$rs" ]; then
+    title "还没有任何角色"
+    say "角色是操盘手按项目需要招的。先跑 ${C_BOLD}./loop.sh ceo${C_OFF}，"
+    say "它会看这个项目反复在哪儿出问题，然后决定需要哪几个专门盯那件事的人。"
+    return 0
+  fi
+  title "现在有这些角色"
+  local r n
+  while IFS= read -r r; do
+    [ -z "$r" ] && continue
+    n="$(find "$LOG_DIR/roles/$r" -name '*.log' 2>/dev/null | wc -l | tr -d ' ')"
+    printf '  %s%-16s%s 聊过 %s 次\n' "$C_BOLD" "$r" "$C_OFF" "${n:-0}"
+    # 角色定义的第一行非空行，就是他管什么
+    sed -n '/^[^#[:space:]]/{p;q}' "$(role_file "$r")" 2>/dev/null | sed 's/^/      /'
+  done <<< "$rs"
+  say ""
+  say "问某个人：${C_BOLD}./loop.sh ask <名字> \"你的问题\"${C_OFF}"
+  say "聊天记录：${C_BOLD}docs/10-会议记录.md${C_OFF}　完整日志：.loop/log/roles/<名字>/"
+}
+
+# 问某个角色一件事。每个角色有自己的对话线程，接着上次聊。
+cmd_ask() {
+  local role="${1:-}" question="${2:-}"
+  [ -n "$role" ] || die "用法：./loop.sh ask <角色> \"问题\"（有哪些角色跑 ./loop.sh roles）"
+  [ -f "$(role_file "$role")" ] || {
+    warn "没有「$role」这个角色。"
+    say  "现有的：$(roles_list | tr '\n' ' ')"
+    say  "招人是操盘手的活：./loop.sh ceo"
+    exit 1
+  }
+  [ -n "$question" ] || die "要问什么？用法：./loop.sh ask $role \"你的问题\""
+
+  title "问「$role」"
+  say "${C_DIM}$question${C_OFF}"
+  rule
+
+  # 只给这个角色该看的那几份，不是全塞。
+  # 全塞的代价实测过：问一句话 $2.76，因为 8 份文档每次重新载入。
+  local ctx=(); local d
+  while IFS= read -r d; do [ -n "$d" ] && ctx+=("$d"); done < <(role_context "$role")
+
+  # 问题先进群聊，再让角色跑。
+  # 反过来的话有两个毛病：群聊里问答顺序是乱的；
+  # 而且角色看不见"我正被问什么"，只能靠提示词里那一份。
+  group_say "你 → @$role" "$question"
+
+  local rc=0
+  ask_role "$role" "$question" "${ctx[@]+"${ctx[@]}"}" || rc=$?
+  [ "$rc" -eq 3 ] && return 0
+  if [ "$rc" -ne 0 ]; then report_failure "$rc" "问「$role」的时候出错了"; return $?; fi
+
+  # 回答进群聊——这样别的角色下次说话前就看得见
+  group_say "$role" "$(tail -60 "$LAST_LOG" 2>/dev/null)"
+
+  ok "已进群聊 ${C_BOLD}docs/10-群聊.md${C_OFF}（完整对话在 ${LAST_LOG#"$ROOT/"}）"
+}
+
+# 内置操盘手：看数、裁决、组队、问责
+#
+# 跟专家席是两个角色，别混：专家各自给判断、可以互相矛盾；
+# 操盘手必须在矛盾之后拍板，并对数字负责。
+# 把选择题原样丢回去是参谋的活——这个命令要先给决定，再让人点头或推翻。
+cmd_ceo() {
+  [ -f "$CMD_DIR/ceo.md" ] || die "缺少 .claude/commands/ceo.md"
+
+  local ctx=() s d
+  for s in "${STAGES[@]}"; do
+    d="$(stage_doc "$s")"
+    [ -n "$d" ] && [ -f "$d" ] && ctx+=("$d")
+  done
+  [ -f "$DOC_DIR/08-每天.md" ]     && ctx+=("$DOC_DIR/08-每天.md")
+  [ -f "$DOC_DIR/09-操盘记录.md" ] && ctx+=("$DOC_DIR/09-操盘记录.md")
+
+  if [ "${#ctx[@]}" -eq 0 ]; then
+    die "还没有任何文档，操盘手没东西可看。先跑 ./loop.sh start \"你想做什么\""
+  fi
+  claude_run "$CMD_DIR/ceo.md" "${ctx[@]}" || true
+}
+
+# 每天用：今天做哪几件事，顺便看昨天到底动了没有
+#
+# 为什么要有这个命令：清单排完之后最常见的死法不是做错，是没做。
+# 每天都很忙，一个月过去清单上一个钩都没多，而且这个死法从内部完全看不出来——
+# 每天都在推进感里，只有把日子摊开数钩才看得见。
+cmd_daily() {
+  [ -f "$CMD_DIR/daily.md" ] || die "缺少 .claude/commands/daily.md"
+  [ -f "$TASKS_FILE" ] || die "还没有任务清单，先把流程跑到第9步「任务清单」（./loop.sh go）"
+
+  local ctx=()
+  [ -f "$DOC_DIR/00-目标.md" ]    && ctx+=("$DOC_DIR/00-目标.md")
+  [ -f "$STANDARDS_FILE" ]        && ctx+=("$STANDARDS_FILE")
+  ctx+=("$TASKS_FILE")
+  [ -f "$DOC_DIR/08-每天.md" ]    && ctx+=("$DOC_DIR/08-每天.md")
+
+  claude_run "$CMD_DIR/daily.md" "${ctx[@]}" || true
+}
+
+# 帮我判断：拿当前这一步的产出，逼问一遍，给出选择题
+cmd_judge() {
+  [ -f "$CMD_DIR/judge.md" ] || die "缺少 .claude/commands/judge.md"
+  local stage; stage="$(state_get stage goal)"
+  local ctx=() s d
+  for s in "${STAGES[@]}"; do
+    d="$(stage_doc "$s")"
+    [ -n "$d" ] && [ -f "$d" ] && ctx+=("$d")
+  done
+  [ -f "$ROOT/references/判断标准.md" ] && ctx+=("$ROOT/references/判断标准.md")
+  title "帮你判断：$(stage_label "$stage")"
+  rule
+  claude_run "$CMD_DIR/judge.md" "${ctx[@]+"${ctx[@]}"}" || true
+}
+
+# 纠错：先归因错在哪一层，再决定怎么改
+cmd_correct() {
+  [ -f "$CMD_DIR/correct.md" ] || die "缺少 .claude/commands/correct.md"
+  local ctx=() s d
+  for s in "${STAGES[@]}"; do
+    d="$(stage_doc "$s")"
+    [ -n "$d" ] && [ -f "$d" ] && ctx+=("$d")
+  done
+  [ -f "$ROOT/references/判断标准.md" ] && ctx+=("$ROOT/references/判断标准.md")
+  [ -f "$STATE_DIR/last-check.txt" ] && ctx+=("$STATE_DIR/last-check.txt")
+  title "纠错：先搞清楚错在哪一层"
+  say "${C_DIM}别急着改东西——改错层，越改越糟。${C_OFF}"
+  rule
+  claude_run "$CMD_DIR/correct.md" "${ctx[@]+"${ctx[@]}"}" || true
+}
+
+cmd_back() {
+  local stage; stage="$(state_get stage goal)"
+  local i; i="$(stage_index "$stage")"
+  [ "$i" -le 0 ] && die "已经在第一步了，退不回去。"
+  local prev="${STAGES[$((i-1))]}"
+  state_set stage "$prev"
+  state_set "signoff_$prev" no
+  state_set "ran_$prev" no      # 清掉"跑过"标记，否则 go 会直接确认跳过，等于没退
+  ok "退回：$(stage_label "$prev")"
+  say "跑 ./loop.sh go 重做这一步。"
+  say "${C_DIM}（旧的那份文档还在，它会在原来的基础上重做——想彻底重来就先把那个文件删了）${C_OFF}"
+}
+
+cmd_reset() {
+  if [ -d "$STATE_DIR" ] || [ -d "$DOC_DIR" ]; then
+    local bak="$ROOT/.loop-backup-$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$bak"
+    # 用 mv 不用 cp：docs 必须真的挪走。
+    # 留在原地的旧文档会让后面的步骤以为"这步已经做过了"，直接跳过——等于没重置。
+    [ -d "$STATE_DIR" ] && mv "$STATE_DIR" "$bak/" 2>/dev/null || true
+    [ -d "$DOC_DIR" ]   && mv "$DOC_DIR"   "$bak/" 2>/dev/null || true
+    ok "旧的东西都挪到了 $bak（没删，随时能翻出来）"
+  fi
+  rm -rf "$STATE_DIR"
+  ok "已重置。跑 ./loop.sh start \"你的想法\" 重新开始。"
+}
+
+cmd_help() {
+  cat <<'EOF'
+自动化流水线 —— 从一个模糊想法，到一个能用的东西
+
+  ./loop.sh start "你想做什么"   开始（一句话说清就行，不用想得多完整）
+  ./loop.sh 答 "1A 2C ..."       回答第1步问你的那几个问题
+  ./loop.sh 听 "任何一段话"       单独用：只把一段话拆开听懂，不开项目
+  ./loop.sh go                   继续往下跑
+  ./loop.sh status               看进度（终端）
+  ./loop.sh 看板                 生成桌面看板：组织图＋群聊＋台账＋账单，双击就开
+  ./loop.sh today                每天用：今天做哪 3 件事，顺便看这周到底动了没有
+  ./loop.sh ceo                  内置操盘手：看数、拍板、组队、问一句还到不到得了目标
+  ./loop.sh budget 50            设花钱上限（美元）。不设就不给跑自动
+  ./loop.sh auto                 无人值守：自己往下跑，撞到闸门/预算/卡点就停
+  ./loop.sh hire [名字...]       从模板招人（不写名字就看有哪些可招）
+  ./loop.sh 专家团               CEO 定这个项目缺哪几块判断、要找什么样的专家
+  ./loop.sh 行业报告 "议题"       行业专家照 CEO 的设计去找人，一人一份落盘
+  ./loop.sh 蒸馏                 把报告里的真专家做成能单独提问的智能体
+  ./loop.sh 专家群 "议题"        让蒸馏出来的专家依次发言，后面的能反驳前面的
+  ./loop.sh 封存 <名字>          用完收起来（不删，随时 ./loop.sh 起复）
+  ./loop.sh 蓝图                 画产品蓝图：形态/功能/技术/时间表，一直改到你说「就是它了」
+  ./loop.sh 改 "A"               回答蓝图的问题，或者说哪儿不对
+  ./loop.sh 定了                 对，这就是我要做的（蓝图锁定）
+  ./loop.sh 启蒙                 四位大师（美学/哲学/历史人文/精神意识）拧出几个方向，细到按钮
+  ./loop.sh 审美                 给你看真东西，从你的选择里反推出你的审美标准
+  ./loop.sh 手册                 一步一步带你做出来，含所有要花钱的点
+  ./loop.sh 上线                 上线前最后一关：三道闸 + CEO 拍板 + 接管运营
+  ./loop.sh 止损 "到6月..."      定止损线（一个日期 + 一个可数的事实）
+  ./loop.sh 记账 收 500 "第一单"  记收支，日报和仪表盘都读它
+  ./loop.sh 日报                 上线之后每天一份，你只看这个
+  ./loop.sh 照镜子               动手之前，先看清你到底想要什么（只用你自己的话当镜子）
+  ./loop.sh 论证                 十个专家把「这事到底成不成」查一遍，给可行性判定
+  ./loop.sh 会诊 "议题"          CEO 判断该问谁 → 逐个咨询 → 综合裁决
+  ./loop.sh 派单                 执行总监把 CEO 的决策拆成每个人的活
+  ./loop.sh 排班                 执行总监定今天每个员工做什么
+  ./loop.sh 派活 <角色> "任务"    单独派一件活给某个人
+  ./loop.sh 验收                 CEO 把干完的活逐个看一遍，判行不行
+  ./loop.sh 台账                 谁手上有什么活、干完没有、验收没有
+  ./loop.sh say "话"             在群里说一句，所有角色下次开口前都会看到
+  ./loop.sh cost                 花了多少钱、哪一步最贵
+  ./loop.sh 接口                 每个员工用谁家的 AI（可以一人一家，互不影响）
+  ./loop.sh 接口 客服 deepseek    把某个员工换成 DeepSeek；换整层写「执行层」
+  ./loop.sh 接口 测 客服          真打一次，验证这个员工的接口通不通
+  ./loop.sh roles                看看现在有哪些角色，各自聊过几次
+  ./loop.sh ask <角色> "问题"     单独问某个人。每个人有自己的对话线程，接着上次聊
+  ./loop.sh explain              用大白话讲一遍现在什么情况
+
+  ./loop.sh judge                它给了个东西，我不知道好不好 → 它逼问自己，给你选择题
+  ./loop.sh correct              感觉哪儿不对 → 先查错在哪一层，再决定怎么改
+
+  ./loop.sh back                 上一步方向就不对，退回去重做
+  ./loop.sh close                结项：封存 + 写一份诚实的复盘
+  ./loop.sh reset                全部清空重来（先自动备份）
+
+流程：
+   1 听懂   把你那段话拆开：哪句承重、真痛点是什么  ← 你拍板
+   2 目标   把想法变成能落地的目标 ＋ 倒推算账
+   3 巨人   把前人做到最好的全扒出来、找现成轮子、挖信息差
+   4 独特   共性守什么、独特赌什么                  ← 你拍板
+   5 标准   定义什么叫「做得好」                    ← 你拍板
+   6 需求   拆成具体要做的东西                      ← 你拍板
+   7 补课   找出你不知道的事并讲明白
+   8 选型   在哪落地、用什么、多少钱                ← 你拍板
+   9 计划   排成可勾选的任务清单
+  10 开做   做→检查→修，自动循环到全部通过
+
+只有标着「你拍板」的五步会停下来等你，其余全自动。
+这四步都是生意问题，不是技术问题——只有你能定。
+
+可调开关（环境变量）：
+  MAX_BUILD_ROUNDS=30   第9步最多循环几轮
+  MAX_FIX_TRIES=3       一个任务最多自动修几次
+  CLAUDE_BIN=claude     claude 命令的路径
+EOF
+}
+
+# ============================================================
+main() {
+  local sub="${1:-help}"; shift || true
+  case "$sub" in
+    start)   cmd_start "${1:-}" ;;
+    answer|答|回答) cmd_answer "${1:-}" ;;
+    listen|听) cmd_listen_once "${1:-}" ;;
+    go|next|continue) cmd_go ;;
+    status|st) cmd_status ;;
+    ceo|操盘) cmd_ceo ;;
+    industry|行业报告) cmd_industry "${1:-}" ;;
+    board|看板) cmd_board_html ;;
+    design|专家团) cmd_panel_design ;;
+    distill|蒸馏) cmd_distill ;;
+    panel|专家群) cmd_expert_panel "${1:-}" ;;
+    archive|封存) cmd_archive_role "${1:-}" ;;
+    unarchive|起复) cmd_unarchive_role "${1:-}" ;;
+    council|会诊) cmd_council "${1:-}" ;;
+    dispatch|派单) cmd_dispatch ;;
+    roster|排班) cmd_roster ;;
+    assign|派活) cmd_assign "${1:-}" "${2:-}" ;;
+    review|验收) cmd_review ;;
+    ledger|台账) cmd_board ;;
+    launch|上线) cmd_launch ;;
+    stoploss|止损) cmd_stoploss "${1:-}" ;;
+    account|记账) cmd_ledger "${1:-}" "${2:-}" "${3:-}" ;;
+    report|日报) cmd_daily_report ;;
+    enlighten|启蒙) cmd_enlighten ;;
+    aesthetic|审美) cmd_aesthetic ;;
+    manual|手册|落地手册) cmd_manual ;;
+    blueprint|蓝图) cmd_blueprint ;;
+    revise|改) cmd_blueprint_answer "${1:-}" ;;
+    lock|定了) cmd_blueprint_lock ;;
+    mirror|照镜子) cmd_mirror ;;
+    argue|论证) cmd_argue ;;
+    provider|接口|换脑子) cmd_provider "${1:-}" "${2:-}" "${3:-}" ;;
+    auto|自动) cmd_auto ;;
+    budget|预算) cmd_budget "${1:-}" ;;
+    close|结项) cmd_close ;;
+    hire|招人) shift 0; cmd_hire "$@" ;;
+    say|说) cmd_say "${1:-}" ;;
+    cost|花钱|账) cmd_cost ;;
+    roles|角色) cmd_roles ;;
+    ask|问)  cmd_ask "${1:-}" "${2:-}" ;;
+    today|daily|今天) cmd_daily ;;
+    explain|讲讲) cmd_explain ;;
+    judge|判断) cmd_judge ;;
+    correct|纠错) cmd_correct ;;
+    back)    cmd_back ;;
+    reset)   cmd_reset ;;
+    help|-h|--help) cmd_help ;;
+    *) die "不认识的命令：$sub（跑 ./loop.sh help 看用法）" ;;
+  esac
+}
+main "$@"
+
+
+▼▼▼ FILE: scripts/lib.sh ▼▼▼
+#!/usr/bin/env bash
+# 公共函数库。被 loop.sh 和其他脚本 source，不单独执行。
+
+# ---------- 颜色（终端不支持时自动降级为空串） ----------
+if [ -t 1 ] && command -v tput >/dev/null 2>&1 && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then
+  C_BOLD="$(tput bold)"; C_DIM="$(tput dim)"; C_RED="$(tput setaf 1)"
+  C_GREEN="$(tput setaf 2)"; C_YELLOW="$(tput setaf 3)"; C_BLUE="$(tput setaf 4)"
+  C_OFF="$(tput sgr0)"
+else
+  C_BOLD=""; C_DIM=""; C_RED=""; C_GREEN=""; C_YELLOW=""; C_BLUE=""; C_OFF=""
+fi
+
+# 中英混排的表格对齐。
+#
+# printf 的 %-12s 是按【字节】补空格的，一个汉字 3 字节但只占 2 格，
+# 所以只要一列里同时有中文和英文，表格必歪。这个函数按【显示宽度】补。
+#
+# 算法：设总字节 B、其中 ASCII 字节 A，则汉字个数 =(B-A)/3，
+# 显示宽度 = A + 2*(B-A)/3。（表情符号是 4 字节，会略微算偏，
+# 角色名里没有表情，够用。）
+pad() {
+  local s="$1" want="${2:-0}" b a w i
+  b=$(printf '%s' "$s" | LC_ALL=C wc -c)
+  a=$(printf '%s' "$s" | LC_ALL=C tr -cd '\000-\177' | LC_ALL=C wc -c)
+  w=$(( a + 2 * (b - a) / 3 ))
+  printf '%s' "$s"
+  for ((i=w; i<want; i++)); do printf ' '; done
+}
+
+say()   { printf '%s\n' "$*"; }
+info()  { printf '%s▸%s %s\n' "$C_BLUE" "$C_OFF" "$*"; }
+ok()    { printf '%s✓%s %s\n' "$C_GREEN" "$C_OFF" "$*"; }
+warn()  { printf '%s!%s %s\n' "$C_YELLOW" "$C_OFF" "$*"; }
+die()   { printf '%s✗%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; exit 1; }
+title() { printf '\n%s%s%s\n' "$C_BOLD" "$*" "$C_OFF"; }
+rule()  { printf '%s%s%s\n' "$C_DIM" "────────────────────────────────────────────────────────" "$C_OFF"; }
+
+# ---------- 路径 ----------
+# ROOT 由调用方设置；这里兜底
+ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+STATE_DIR="$ROOT/.loop"
+LOG_DIR="$STATE_DIR/log"
+DOC_DIR="$ROOT/docs"
+CMD_DIR="$ROOT/.claude/commands"
+
+# ---------- 状态读写（纯文本，不依赖 jq） ----------
+# 每个状态是一个文件，内容就是值。最笨但最不会坏。
+state_get() {
+  local key="$1" default="${2:-}"
+  if [ -f "$STATE_DIR/$key" ]; then cat "$STATE_DIR/$key"; else printf '%s' "$default"; fi
+}
+state_set() {
+  local key="$1" value="$2"
+  mkdir -p "$STATE_DIR"
+  printf '%s' "$value" > "$STATE_DIR/$key"
+}
+
+# ---------- 阶段定义 ----------
+# 顺序即流水线顺序。改这里就能增删阶段。
+STAGES=(听懂 goal giants edge taste spec unknowns stack plan build done)
+
+# 阶段的中文名，给人看的。
+#
+# 「第几步」是【算出来的】，不是手写的。
+#
+# 为什么：这些编号以前每处手写一遍，一插新步骤就得挨个改，漏一个就错一个，
+# 而且错了看不出来——references/框架库.md 里到现在还写着「第4步『要做什么』」，
+# 可那时候「要做什么」早就是第5步了。没人发现，因为没人会去核对编号。
+# 现在编号跟着 STAGES 里的位置走，改顺序自动跟着变。
+stage_num() {
+  local i; i="$(stage_index "$1")"
+  [ "$i" -lt 0 ] && { echo "?"; return; }
+  echo "$((i+1))"
+}
+
+stage_label() {
+  local n; n="$(stage_num "$1")"
+  case "$1" in
+    听懂)     echo "第${n}步 · 先听懂你到底要什么（要问你几个问题）" ;;
+    goal)     echo "第${n}步 · 把想法变成一句能落地的目标" ;;
+    giants)   echo "第${n}步 · 站在巨人肩上：把前人最好的全扒出来" ;;
+    edge)     echo "第${n}步 · 共性与独特：凭什么是我们（只有你能拍板）" ;;
+    taste)    echo "第${n}步 · 定义什么叫「做得好」（只有你能拍板）" ;;
+    spec)     echo "第${n}步 · 把目标拆成具体要做的东西" ;;
+    unknowns) echo "第${n}步 · 找出你不知道的事，并讲明白" ;;
+    stack)    echo "第${n}步 · 决定在哪儿落地、用什么做" ;;
+    plan)     echo "第${n}步 · 排成一份可勾选的任务清单" ;;
+    build)    echo "第${n}步 · 自动开做：做→检查→修，循环到过关" ;;
+    done)     echo "完成 · 所有任务已勾完" ;;
+    *)        echo "$1" ;;
+  esac
+}
+
+# 这个阶段做完后，是否需要你本人点头确认
+# 判断依据：这一步定的是「生意问题」还是「技术问题」。生意问题必须你拍板。
+stage_needs_signoff() {
+  case "$1" in
+    听懂|edge|taste|spec|stack) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# 阶段产出的文档
+stage_doc() {
+  case "$1" in
+    听懂)     echo "$DOC_DIR/00-听到的.md" ;;
+    goal)     echo "$DOC_DIR/00-目标.md" ;;
+    giants)   echo "$DOC_DIR/01-巨人的肩膀.md" ;;
+    edge)     echo "$DOC_DIR/02-共性与独特.md" ;;
+    taste)    echo "$DOC_DIR/03-什么算好.md" ;;
+    spec)     echo "$DOC_DIR/04-要做什么.md" ;;
+    unknowns) echo "$DOC_DIR/05-我不懂的.md" ;;
+    stack)    echo "$DOC_DIR/06-技术与落地.md" ;;
+    plan)     echo "$DOC_DIR/07-任务清单.md" ;;
+    *)        echo "" ;;
+  esac
+}
+
+# ---------- 第1步「听懂」的多轮状态 ----------
+#
+# 这一步跟别的步不一样：它是【引导式】的，可能要问你好几轮。
+# 所以它的产物里有一行机器读的状态：
+#
+#     轮次：第 2 轮   状态：还没听懂
+#
+# 还没听懂 → 停下来等你回答，不往下走
+# 听懂了   → 才轮到你点头确认，然后进第2步
+#
+LISTEN_FILE="$DOC_DIR/00-听到的.md"
+LISTEN_MAX_ROUNDS="${LISTEN_MAX_ROUNDS:-3}"
+
+# ---------- 收敛循环（通用）----------
+#
+# 「一直改到你说这就是我要的」这件事，第1步（听懂）和产品蓝图是同一个机制：
+#   文档里有一行机器读的状态 → 没到就停下问你 → 一次只问一个 →
+#   全答完了才回去重跑一轮 → 它自己写"到了"，才算收敛。
+#
+# 所以抽成通用的，两处共用一套。下面的 listen_* 是它的一层薄壳。
+# 抽出来的另一个好处：这套机制只需要测一次。
+round_state() {           # round_state <文件> <到了的标志词>
+  local f="$1" mark="$2"
+  [ -f "$f" ] || { echo 没开始; return; }
+  if grep -qE "状态(:|：)[[:space:]]*$mark" "$f" 2>/dev/null; then echo 到了; else echo 还没到; fi
+}
+round_num() {             # 轮次：第 N 轮
+  local n
+  n="$(grep -m1 -oE '轮次(:|：)[[:space:]]*第[[:space:]]*[0-9]+' "$1" 2>/dev/null \
+       | grep -oE '[0-9]+' || true)"
+  echo "${n:-0}"
+}
+round_qsection() {        # 把提问那一节摘出来（从 <起始标题> 到 <结束标题>）
+  [ -f "$1" ] || return 0
+  awk -v a="$2" -v b="$3" '$0 ~ a { on=1 } on && $0 ~ b { exit } on { print }' "$1" 2>/dev/null
+}
+round_q_count() { round_qsection "$@" | grep -cE '^###[[:space:]]*问题' 2>/dev/null || echo 0; }
+round_q_nth() {           # round_q_nth <文件> <起> <止> <第几个>
+  local f="$1" a="$2" b="$3" n="$4"
+  round_qsection "$f" "$a" "$b" | awk -v want="$n" '
+    /^###[[:space:]]*问题/ { i++; if (i == want) { on = 1 } else if (on) { exit } }
+    on { print }'
+}
+# 答题进度带轮次，换轮自动归零——不带的话下一轮会以为都答过了，跳过所有问题
+round_answered() {        # round_answered <进度文件> <当前轮次>
+  local raw; raw="$(cat "$1" 2>/dev/null || echo)"
+  [ "${raw%%:*}" = "$2" ] && echo "${raw##*:}" || echo 0
+}
+round_answered_set() { mkdir -p "$STATE_DIR"; printf '%s:%s' "$2" "$3" > "$1"; }
+
+# 下面五个是上面那套通用机制的薄壳，专给第1步「听懂」用。
+#
+# 冒号要写成 (:|：) 这种并列，不能写成 [:：]——全角冒号是 3 个字节，
+# 方括号会把它拆成 3 个单字节，匹配就废了。这个坑栽过一次。
+#
+# 还有一条也是测试逮出来的：状态那一行长这样
+#   「轮次：第 2 轮   状态：还没听懂」
+# 两个字段【在同一行】，所以匹配不许锚定行首。
+listen_state() {
+  local r; r="$(round_state "$LISTEN_FILE" 听懂了)"
+  case "$r" in 到了) echo 听懂了 ;; 没开始) echo 没开始 ;; *) echo 还没听懂 ;; esac
+}
+listen_round()     { round_num "$LISTEN_FILE"; }
+listen_questions() { round_qsection "$LISTEN_FILE" '^##[[:space:]]*四、' '^##[[:space:]]*五、'; }
+listen_q_count()   { round_q_count  "$LISTEN_FILE" '^##[[:space:]]*四、' '^##[[:space:]]*五、'; }
+listen_q_nth()     { round_q_nth    "$LISTEN_FILE" '^##[[:space:]]*四、' '^##[[:space:]]*五、' "$1"; }
+
+LISTEN_PROGRESS="$STATE_DIR/答题进度"
+listen_answered()     { round_answered "$LISTEN_PROGRESS" "$(listen_round)"; }
+listen_answered_set() { round_answered_set "$LISTEN_PROGRESS" "$(listen_round)" "$1"; }
+
+
+# 任务清单的路径，多处用到，集中在这里
+TASKS_FILE="$DOC_DIR/07-任务清单.md"
+
+# 「什么算好」的文件。双回路转没转，看它末尾那张「标准修订记录」表。
+STANDARDS_FILE="$DOC_DIR/03-什么算好.md"
+
+# 标准修订记录里有几条真实记录（表头和分隔线不算，空行不算）。
+#
+# 为什么要数这个：「标准会随证据修订」是这套东西跟所有同类工具唯一的区别——
+# 别人都在做「东西符不符合标准」，没人做「标准本身是不是定错了」。
+# 说明书里写死了：每做完一个任务必须回头问一句「有没有哪条标准要改」，
+# 改了记一笔，没改也记一笔「看过，没改」。
+#
+# 但真跑五轮下来，那张表一行都没有，连"看过没改"都没有，
+# 而整个 loop.sh 里零处检查这件事。规矩写了 ≠ 规矩执行了。
+# 它悄悄没执行，这套东西唯一的差异化就是空的——而且从外面完全看不出来。
+revisions_count() {
+  [ -f "$STANDARDS_FILE" ] || { echo 0; return; }
+  awk '
+    /^##[[:space:]]*标准修订记录/ { on=1; next }
+    on && /^##[[:space:]]/ { exit }
+    on && /^[[:space:]]*\|/ {
+      rows++
+      if (rows <= 2) next          # 第1行表头、第2行分隔线，都不算
+      t=$0; gsub(/[|[:space:]-]/,"",t)
+      if (t != "") n++
+    }
+    END { print n+0 }
+  ' "$STANDARDS_FILE"
+}
+
+stage_index() {
+  local want="$1" i=0
+  for s in "${STAGES[@]}"; do
+    [ "$s" = "$want" ] && { echo "$i"; return 0; }
+    i=$((i+1))
+  done
+  echo "-1"
+}
+
+next_stage() {
+  local i; i="$(stage_index "$1")"
+  [ "$i" -lt 0 ] && { echo "goal"; return; }
+  local n=$((i+1))
+  if [ "$n" -ge "${#STAGES[@]}" ]; then echo "done"; else echo "${STAGES[$n]}"; fi
+}
+
+# ---------- 调用 Claude ----------
+CLAUDE_BIN="${CLAUDE_BIN:-claude}"
+
+# 每一步需要用到的工具，直接点名放行。
+#
+# 为什么要显式写出来：工作目录没被"信任"过的时候，
+# .claude/settings.json 里的权限会被【整个忽略】，
+# 于是联网搜索被挡 → 第2步查不了资料 → 整条 loop 卡死在这儿。
+# 这是第一次真跑时的实际死因，不是理论问题。
+#
+# 显式放行比依赖信任开关好：别人 clone 走这个模板，不用改自己的全局配置就能跑。
+LOOP_ALLOWED_TOOLS="${LOOP_ALLOWED_TOOLS:-WebSearch WebFetch Read Write Edit Glob Grep TodoWrite Bash}"
+
+have_claude() { command -v "$CLAUDE_BIN" >/dev/null 2>&1; }
+
+# ---------- 花了多少钱 ----------
+#
+# 为什么要记这个：这套东西两次撞上额度上限、白烧 5 次重试，
+# 而在此之前它对自己花了多少钱【零可见性】。
+# 更要命的是不均匀——实测一句"说好"就花了 $1.17，
+# 因为整个项目上下文每次都要重新载进去。
+# 不记账的话，你只会在撞上限的那一刻才知道，而那时候已经晚了。
+COST_LOG="$STATE_DIR/cost.tsv"
+
+# 解析 JSON 用什么。两个都没有就退回纯文本模式，不记账但照常能跑——
+# 这是模板，不能因为别人机器上没装 jq 就不能用。
+json_parser() {
+  if command -v jq >/dev/null 2>&1; then echo jq
+  elif command -v python3 >/dev/null 2>&1; then echo python3
+  else echo ""; fi
+}
+
+# json_field <json文件> <字段名> —— 取一个顶层字段，取不到返回空
+json_field() {
+  local f="$1" k="$2"
+  case "$(json_parser)" in
+    jq)      jq -r --arg k "$k" '.[$k] // empty' < "$f" 2>/dev/null ;;
+    python3) python3 -c "
+import json,sys
+try:
+    v=json.load(open(sys.argv[1])).get(sys.argv[2])
+    if v is not None: print(v)
+except Exception: pass
+" "$f" "$k" 2>/dev/null ;;
+    *) : ;;
+  esac
+}
+
+cost_total() {
+  [ -f "$COST_LOG" ] || { echo 0; return; }
+  awk -F'\t' 'NR>1 && $3!="" { t += $3 } END { printf "%.2f", t+0 }' "$COST_LOG"
+}
+
+# 预算闸门。
+#
+# 为什么必须有：实测一次调用 $0.68~$8.20。
+# 没有闸门就开无人值守，等于装了个不封顶的水龙头——
+# 一晚上能烧掉几百刀，而你睡着了。
+#
+# 闸门只拦「还没花的」，不会把已经花的退回来，所以要设在你真能接受的数上。
+budget_get() { state_get budget "${LOOP_BUDGET:-}"; }
+
+# 还能不能再花。能就返回 0，不能就打印原因并返回 1。
+budget_ok() {
+  local b; b="$(budget_get)"
+  [ -z "$b" ] && return 0            # 没设预算就不拦，但 auto 模式会强制要求设
+  local spent; spent="$(cost_total)"
+  # 用 awk 比大小，bash 不会算小数
+  if awk -v s="$spent" -v b="$b" 'BEGIN{exit !(s>=b)}'; then
+    rule
+    warn "到预算上限了，停下。"
+    say  "  已经花了 \$$spent，你设的上限是 \$$b。"
+    say  ""
+    say  "想继续就调高上限：${C_BOLD}./loop.sh budget <新的数>${C_OFF}"
+    say  "先看看钱花哪了：${C_BOLD}./loop.sh cost${C_OFF}"
+    rule
+    return 1
+  fi
+  return 0
+}
+
+cost_record() {
+  local what="$1" cost="$2" ms="$3"
+  mkdir -p "$STATE_DIR"
+  [ -f "$COST_LOG" ] || printf '时间\t干什么\t花了(美元)\t用时(秒)\t接口\n' > "$COST_LOG"
+  # 第5列记「这一笔走的谁家接口」。
+  #
+  # 为什么必须记：这个美元数是 claude 自己按【官方价目表】算出来的。
+  # 走别家接口（比如 DeepSeek）时，它照样会报一个数，但那个数是错的——
+  # 它不知道别家收多少钱。不标出来的话，账面上会凭空冒出一笔假账。
+  printf '%s\t%s\t%s\t%s\t%s\n' \
+    "$(date '+%Y-%m-%d %H:%M')" "$what" "${cost:-0}" "$(( ${ms:-0} / 1000 ))" \
+    "${LOOP_PROVIDER:-官方}" >> "$COST_LOG"
+}
+
+# ---------- 角色（操盘手 / 专家 / CEO 招的人）----------
+#
+# 每个角色是一个独立的对话线程：自己的会话、自己的日志、自己的记录。
+#
+# 为什么要分开：一个脑子里同时装着获客、合规、成本，三件事都想得很浅。
+# 分开之后每个角色只盯一件事，视角不互相污染。
+#
+# 两条是实测出来的，不是设想的：
+#   1. --session-id 钉住会话，下次 -r 接着说，它确实记得上次说过什么。
+#   2. 但 --append-system-prompt 立不住角色身份——CLAUDE.md 分量太重会盖过它。
+#      所以角色身份必须写在提示词正文里，每次都带上。
+ROLE_DIR="$STATE_DIR/roles"
+
+# 群聊：所有角色都读、都写的那一个文件，你也在里面。
+#
+# 为什么必须有：没有它，21 个角色只是 21 个互不相干的对话——
+# 每个人都只知道自己说过什么，不知道别人说了什么，
+# 那不叫组织，叫二十一个独立顾问。
+#
+# 为什么是文件不是飞书：这套东西是你机器上的一个脚本，没有常驻服务。
+# 接飞书要注册应用、拿凭证、开一个一直跑着的进程收 webhook——那是另一个项目。
+# 而「他们能互相交流、我能看见并指挥」这件事，一个共享文件就能成立。
+# 飞书只是把这个文件换个更好看的显示界面，不是换个机制。
+GROUP_CHAT="$DOC_DIR/10-群聊.md"
+MEETING_LOG="$GROUP_CHAT"     # 兼容旧名字
+
+# 群聊最近的 N 行，喂给角色当上下文——这样他们才看得见别人说了什么
+GROUP_CHAT_TAIL="${GROUP_CHAT_TAIL:-120}"
+
+group_chat_init() {
+  [ -f "$GROUP_CHAT" ] && return 0
+  mkdir -p "$DOC_DIR"
+  cat > "$GROUP_CHAT" <<'MD'
+# 10 · 群聊
+
+> 这里是所有角色和你共处的一个地方。
+> **每个角色说话前都会先看这里最近的内容**，所以他们看得见彼此说了什么。
+>
+> - 你说话：`./loop.sh say "你的话"`，或者直接在这个文件末尾打字
+> - 问某个人：`./loop.sh ask <名字> "问题"`，问和答都会出现在这里
+> - **只追加，不改写**——改过的记录看不出当时到底怎么想的，就没有价值了
+
+MD
+}
+
+# 把群聊最近的内容抠出来，给角色当上下文
+group_chat_recent() {
+  [ -f "$GROUP_CHAT" ] || return 0
+  local tmp="$STATE_DIR/群聊-最近.md"
+  { printf '# 群聊最近的内容（你说话前先看一眼，别人可能已经说过了）\n\n'
+    tail -n "$GROUP_CHAT_TAIL" "$GROUP_CHAT"; } > "$tmp"
+  printf '%s' "$tmp"
+}
+
+# 往群聊里说一句话
+group_say() {
+  local who="$1" text="$2"
+  group_chat_init
+  { printf '\n**%s · %s**\n\n%s\n' "$(date '+%m-%d %H:%M')" "$who" "$text"; } >> "$GROUP_CHAT"
+}
+
+new_uuid() {
+  if [ -r /proc/sys/kernel/random/uuid ]; then cat /proc/sys/kernel/random/uuid
+  elif command -v uuidgen >/dev/null 2>&1; then uuidgen | tr 'A-Z' 'a-z'
+  else printf '%s-%s-4%s-8%s-%s' \
+    "$(od -An -tx1 -N4 /dev/urandom | tr -d ' \n')" \
+    "$(od -An -tx1 -N2 /dev/urandom | tr -d ' \n')" \
+    "$(od -An -tx1 -N2 /dev/urandom | tr -d ' \n' | cut -c2-4)" \
+    "$(od -An -tx1 -N2 /dev/urandom | tr -d ' \n' | cut -c2-4)" \
+    "$(od -An -tx1 -N6 /dev/urandom | tr -d ' \n')"
+  fi
+}
+
+roles_list() {
+  [ -d "$ROLE_DIR" ] || return 0
+  find "$ROLE_DIR" -maxdepth 1 -name '*.md' -exec basename {} .md \; 2>/dev/null | sort
+}
+
+role_file()    { echo "$ROLE_DIR/$1.md"; }
+role_session() { echo "$ROLE_DIR/$1.session"; }
+
+# 这个角色用哪个模型。
+#
+# 这就是「以后接便宜 AI」的接口：在角色定义里写一行
+#   模型：sonnet
+# 就行。客服分拣、竞品巡查这种活用便宜的；
+# CEO 裁决、风控反证这种活用最强的——**判断力省不得，体力活可以省。**
+#
+# 要接非官方的便宜服务，在 .loop/roles/<名字>.env 里写 endpoint 和 key，
+# 那个文件会在调用这个角色时被 source 进去，只影响他一个人。
+# ---------- 派活台账 ----------
+#
+# 每个角色有自己的工作区 work/<角色>/，交付物落在那儿，互不踩。
+# 项目文档 docs/ 所有人只读——那是共同的事实基础，谁都不许偷偷改。
+#
+# 为什么要台账：光有「问答」不够。真干活是
+#   派活 → 他自己去搜、去做 → 交付一个文件 → CEO 验收行不行。
+# 没有台账就看不出「谁手上有什么活、干完没有、验收过没有」。
+WORK_DIR="$ROOT/work"
+TASK_LOG="$STATE_DIR/tasks.tsv"
+
+role_workspace() { echo "$WORK_DIR/$1"; }
+
+task_log_init() {
+  mkdir -p "$STATE_DIR"
+  [ -f "$TASK_LOG" ] || printf '编号\t派给谁\t干什么\t状态\t交付物\t时间\n' > "$TASK_LOG"
+}
+
+# task_add <角色> <任务> <交付物路径> —— 返回编号
+task_add() {
+  task_log_init
+  local n; n="$(( $(wc -l < "$TASK_LOG") ))"   # 表头占一行，所以这就是新编号
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$n" "$1" "$2" "派了" "$3" "$(date '+%m-%d %H:%M')" >> "$TASK_LOG"
+  echo "$n"
+}
+
+task_set_state() {
+  local id="$1" st="$2"
+  [ -f "$TASK_LOG" ] || return 0
+  awk -F'\t' -v OFS='\t' -v id="$id" -v st="$st" \
+    'NR==1||$1!=id{print;next}{$4=st;print}' "$TASK_LOG" > "$TASK_LOG.tmp" \
+    && mv "$TASK_LOG.tmp" "$TASK_LOG"
+}
+
+# 等着验收的活（干完了但还没验收）
+tasks_pending_review() {
+  [ -f "$TASK_LOG" ] || return 0
+  awk -F'\t' 'NR>1 && $4=="干完了"' "$TASK_LOG"
+}
+
+role_model() {
+  local rf; rf="$(role_file "$1")"
+  grep -m1 -E '^模型(:|：)' "$rf" 2>/dev/null | sed -E 's/^模型(:|：)[[:space:]]*//' || true
+}
+role_env() { echo "$ROLE_DIR/$1.env"; }
+
+# 这个角色在哪一层（参谋 / 执行）。模板第一行写着「层：参谋」。
+role_layer() {
+  local rf; rf="$(role_file "$1")"
+  grep -m1 -E '^层(:|：)' "$rf" 2>/dev/null | sed -E 's/^层(:|：)[[:space:]]*//' || true
+}
+
+# ---------- 接口：每个员工用谁家的脑子 ----------
+#
+# 一个员工 = 一个独立智能体 = 自己的会话 + 自己的工作目录 + 【自己的接口】。
+# 这三样分开，是"21 个角色"和"一个人格分裂的 AI"的区别。
+#
+# 换脑子只改一个文件：.loop/roles/<名字>.env，只影响他一个人。
+# 调用他的时候在【子 shell 里】source 进去，跑完就没了，不污染别人。
+PROVIDER_DIR="$STATE_DIR/接口"
+
+# 供应商清单：代号|显示名|接口地址|主力模型|快模型|查证日期|来源
+#
+# 铁律：这张表里只许写【查证过】的。凭印象加一家进来，
+# 用户照着配一次配不通，这个功能就废了。
+provider_row() {
+  case "$1" in
+    官方|anthropic|claude)
+      echo "官方|Anthropic 官方|||||" ;;
+    deepseek|深度求索|ds|deepseek-pro)
+      echo "deepseek|DeepSeek V4-Pro|https://api.deepseek.com/anthropic|deepseek-v4-pro|deepseek-v4-flash|2026-08-13|api-docs.deepseek.com" ;;
+    deepseek-flash|ds-flash|flash)
+      echo "deepseek-flash|DeepSeek V4-Flash|https://api.deepseek.com/anthropic|deepseek-v4-flash|deepseek-v4-flash|2026-08-13|api-docs.deepseek.com" ;;
+    *) return 1 ;;
+  esac
+}
+# 表里没有这家（比如用户自己手写的 .env），就把代号原样还回去，
+# 别返回空——空会让一览表里凭空少一行，看起来像"这个人没配"。
+provider_field() {
+  local r; r="$(provider_row "$1")" || { echo "$1"; return 0; }
+  echo "$r" | cut -d'|' -f"$2"
+}
+
+# 把整张供应商表倒出来（面板要用）。
+# 只有这一张表是真的，面板不许自己再抄一份——抄一份就会有一天两边对不上。
+PROVIDERS_ALL="官方 deepseek deepseek-flash"
+provider_dump() {
+  local c
+  for c in $PROVIDERS_ALL; do provider_row "$c"; done
+}
+
+# 同一家的不同型号共用一把钥匙（v4-pro 和 v4-flash 都是 DeepSeek 的）
+provider_family() {
+  case "$1" in
+    deepseek*|ds*|flash|深度求索) echo deepseek ;;
+    *) echo "$1" ;;
+  esac
+}
+provider_keyfile() { echo "$PROVIDER_DIR/$(provider_family "$1").key"; }
+
+# 这个员工现在用谁家的。没有 .env 就是官方。
+role_provider() {
+  local ef; ef="$(role_env "$1")"
+  [ -f "$ef" ] || { echo 官方; return; }
+  local p; p="$(grep -m1 '^LOOP_PROVIDER=' "$ef" 2>/dev/null | cut -d= -f2- || true)"
+  echo "${p:-自定义}"
+}
+
+# 把某个员工切到某一家。钥匙单独存一份，不重复写进每个人的文件。
+provider_apply() {
+  local role="$1" code="$2"
+  local row; row="$(provider_row "$code")" || return 1
+  local name url big small verified
+  name="$(echo "$row" | cut -d'|' -f2)"
+  url="$(echo "$row"  | cut -d'|' -f3)"
+  big="$(echo "$row"  | cut -d'|' -f4)"
+  small="$(echo "$row"| cut -d'|' -f5)"
+  verified="$(echo "$row" | cut -d'|' -f6)"
+  code="$(echo "$row" | cut -d'|' -f1)"
+
+  # 切回官方 = 把这个人的接口文件删掉，回到默认
+  if [ -z "$url" ]; then rm -f "$(role_env "$role")"; return 0; fi
+
+  local kf; kf="$(provider_keyfile "$code")"
+  [ -f "$kf" ] || return 2          # 还没给钥匙，让上层去要
+
+  mkdir -p "$ROLE_DIR"
+  cat > "$(role_env "$role")" <<EOF
+# 「$role」这个员工用：$name
+# 只影响他一个人。这个文件在调用他的时候被 source 进子 shell，跑完就没了。
+# 接口地址查证日期：$verified
+LOOP_PROVIDER=$code
+. "\$PROVIDER_DIR/$(provider_family "$code").key"
+ANTHROPIC_BASE_URL=$url
+ANTHROPIC_MODEL=$big
+ANTHROPIC_DEFAULT_OPUS_MODEL=$big
+ANTHROPIC_DEFAULT_SONNET_MODEL=$big
+ANTHROPIC_DEFAULT_HAIKU_MODEL=$small
+EOF
+  return 0
+}
+
+# 存钥匙。单独一个文件、只有自己能读，别人的 .env 引用它。
+#
+# 为什么不直接写进每个人的 .env：十个员工就是十份钥匙拷贝，
+# 换钥匙要改十个地方，漏一个就有一个人在用旧的。
+provider_save_key() {
+  local code="$1" key="$2"
+  local fam; fam="$(provider_family "$code")"
+  mkdir -p "$PROVIDER_DIR"
+  local kf="$PROVIDER_DIR/$fam.key"
+  cat > "$kf" <<EOF
+ANTHROPIC_AUTH_TOKEN=$key
+# 官方的 key 如果也在环境里，会跟这把打架，明确清掉
+unset ANTHROPIC_API_KEY
+EOF
+  chmod 600 "$kf" 2>/dev/null || true
+}
+
+# 这个角色要看哪几份文档。
+#
+# 为什么不能全塞：实测问一个只管获客的角色一句话，花了 $2.76、81 秒——
+# 因为把全部 8 份文档都塞给它了，包括跟它完全无关的「技术与落地」。
+# 角色分工的意义是各看各的那一块，全塞进去等于分工白分。
+#
+# 角色定义文件里可以写一行「上下文：00-目标.md 02-共性与独特.md」来指定；
+# 不写就用默认的三份（要什么 / 凭什么是我们 / 什么算好），够绝大多数角色用。
+role_context() {
+  local rf; rf="$(role_file "$1")"
+  local line; line="$(grep -m1 -E '^上下文(:|：)' "$rf" 2>/dev/null | sed -E 's/^上下文(:|：)[[:space:]]*//' || true)"
+  [ -z "$line" ] && line="00-目标.md 02-共性与独特.md 03-什么算好.md"
+  local f
+  for f in $line; do
+    [ -f "$DOC_DIR/$f" ] && printf '%s\n' "$DOC_DIR/$f"
+  done
+}
+
+# 最近一次调用的日志路径，claude_run 里赋值
+LAST_LOG=""
+
+# 分清「外面的原因」和「这一步真做错了」。
+#
+# 这两种失败在屏幕上长得一模一样（都是"没跑成功"），但处理方式完全相反：
+#   额度用完/断网 → 等一会儿再跑就好，重跑一百次也没用
+#   真做错了      → 得看日志改东西，不改再跑还是错
+#
+# 为什么要专门写这个：第一次跑到底的测试里，AI 额度用完了，
+# 而循环分不清这两种情况，对着同一个"额度已用完"空转重试了 5 次。
+# 分不清的代价不是白等，是把剩下的额度也烧在无用功上。
+#
+# 输出：<类型>制表符<日志里的原话>；不是外部原因就返回 1。
+blocker_reason() {
+  local logf="$1" line
+  [ -f "$logf" ] || return 1
+  line="$(grep -m1 -iE 'hit your (session|usage) limit|usage limit reached|rate limit|too many requests|credit balance|quota exceeded' "$logf" 2>/dev/null || true)"
+  [ -n "$line" ] && { printf '%s\t%s' quota "$line"; return 0; }
+  line="$(grep -m1 -iE 'getaddrinfo|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|fetch failed|network error|socket hang up' "$logf" 2>/dev/null || true)"
+  [ -n "$line" ] && { printf '%s\t%s' network "$line"; return 0; }
+  return 1
+}
+
+# claude_run <提示词文件> [附加上下文文件...]
+# 把提示词和上下文拼起来丢给 claude；没装 claude 就把提示词存下来让用户手动贴。
+# 去掉说明书开头那段 --- 包起来的标注（它是给 slash command 用的）。
+# 不去掉的话，提示词以 --- 开头，会被命令行当成一个选项，直接报
+# "unknown option"——每一步都会挂。这个 bug 用假 claude 测不出来。
+# 去掉 .md 开头那段 --- 包起来的 frontmatter（description 之类）。
+#
+# 为什么要去：以 --- 开头的内容喂给 claude 会被当成命令行选项。
+#
+# 这里栽过一个很贵的坑，值得写清楚：
+# 原来写的是 sed '1{/^---$/!q};1,/^---$/d'
+# 意思本来是「第一行不是 --- 就别删」，但 sed 的 q 是【打印当前行然后退出】——
+# 于是对没有 frontmatter 的文件，它只输出了【第一行】。
+#
+# 后果：ask_role 拼给角色的提示词是「角色定义 + 问题」，开头是「层：参谋」，
+# 不是 ---。所以每个角色实际收到的只有「层：参谋」这一行，
+# 【它自己的身份没收到，你问的问题也没收到】——只有附在后面的文档。
+# 它照样会输出东西（有文档就能编出个样子），所以从外面完全看不出来。
+#
+# 这正是这套东西反复栽的那一种：跑了 ≠ 跑对了。
+strip_frontmatter() {
+  if [ "$(head -1 "$1")" = "---" ]; then
+    sed '1,/^---$/d' "$1"       # 有 frontmatter：删到第二个 --- 为止
+  else
+    cat "$1"                     # 没有：原样全给
+  fi
+}
+
+claude_run() {
+  local prompt_file="$1"; shift
+  local ctx="" f
+  for f in "$@"; do
+    [ -f "$f" ] && ctx+=$'\n\n---- 已有资料：'"$(basename "$f")"$' ----\n'"$(cat "$f")"
+  done
+
+  local prompt
+  prompt="$(strip_frontmatter "$prompt_file")$ctx"
+
+  # 角色的日志各自归各自的目录，方便按人回看整条对话
+  local dir="$LOG_DIR${LOG_SUBDIR:+/$LOG_SUBDIR}"
+  mkdir -p "$dir"
+  local ts; ts="$(date +%Y%m%d-%H%M%S)"
+  local logf="$dir/$ts-$(basename "$prompt_file" .md).log"
+  # 出事的时候要回头翻这个日志，见 blocker_reason。
+  #
+  # 为什么还要多写一个文件：接了别家接口的角色，claude_run 是在【子 shell】里跑的
+  # （因为要 source 他自己的 .env 又不能污染别人）。子 shell 里的赋值出不来，
+  # LAST_LOG 在外面就是空的——于是"没通"能报出来，但"为什么没通"整段是空白。
+  # 落一个文件，外面再捡回去，见 ask_role 结尾。
+  LAST_LOG="$logf"
+  state_set last_log "$logf"
+
+  # 花钱之前先过预算闸门
+  budget_ok || return 4
+
+  if ! have_claude; then
+    local dump="$STATE_DIR/待手动执行.txt"
+    printf '%s' "$prompt" > "$dump"
+    warn "没找到 claude 命令，无法自动跑。"
+    say  "  提示词已存到：$dump"
+    say  "  你可以打开 Claude Code，把这个文件的内容整段贴进去，效果一样。"
+    return 3
+  fi
+
+  # 提示词走标准输入，不走命令行参数。两个原因：
+  #   1. 参数里的特殊开头（比如 ---）会被当成选项
+  #   2. 上下文越堆越长，迟早撞上命令行长度上限，走标准输入没这个限制
+  # --permission-mode acceptEdits：允许它直接改文件，否则每步都要你按确认，就不叫自动了
+  local what; what="${LOG_SUBDIR:-$(basename "$prompt_file" .md)}"
+
+  # 能解析 JSON 就走 json 模式，顺手把花了多少钱记下来；
+  # 解析不了就退回纯文本，照常能跑，只是没有账。
+  if [ -n "$(json_parser)" ]; then
+    local raw="$logf.json"
+    # ROLE_CWD：在指定目录里跑，而不是项目根目录。
+    #
+    # 为什么需要：项目根目录有 CLAUDE.md，它的分量压过一切提示词——
+    # 实测让「行业专家」去做一份跟本项目无关的行业报告，
+    # 它读完项目的 CLAUDE.md 和任务清单，跑去汇报项目进度、
+    # 甚至去做项目的开发任务，连着两次都没交该交的报告。
+    # 提示词里写"别管项目"没用，得让它根本不在那个目录里。
+    # 这也正是「每个角色独立环境」真正该有的样子。
+    # shellcheck disable=SC2086
+    printf '%s' "$prompt" | ( [ -n "${ROLE_CWD:-}" ] && cd "$ROLE_CWD"; "$CLAUDE_BIN" -p \
+        ${CLAUDE_EXTRA_ARGS[@]+"${CLAUDE_EXTRA_ARGS[@]}"} \
+        --output-format json \
+        --permission-mode acceptEdits \
+        --allowedTools $LOOP_ALLOWED_TOOLS ) > "$raw" 2>"$logf.err"
+    local rc="$?"
+
+    # 正文照样打出来给人看，别为了记账就把人能看的东西弄没了
+    local text; text="$(json_field "$raw" result)"
+    if [ -n "$text" ]; then printf '%s\n' "$text" | tee "$logf"
+    else cat "$logf.err" 2>/dev/null | tee "$logf"; fi
+
+    cost_record "$what" "$(json_field "$raw" total_cost_usd)" "$(json_field "$raw" duration_ms)"
+    return "$rc"
+  fi
+
+  # shellcheck disable=SC2086
+  printf '%s' "$prompt" | "$CLAUDE_BIN" -p \
+      ${CLAUDE_EXTRA_ARGS[@]+"${CLAUDE_EXTRA_ARGS[@]}"} \
+      --permission-mode acceptEdits \
+      --allowedTools $LOOP_ALLOWED_TOOLS 2>&1 | tee "$logf"
+  return "${PIPESTATUS[1]}"
+}
+
+# 问某个角色一个问题。每个角色有自己的会话，接着上次聊。
+# 用法：ask_role <角色名> <问题> [附加上下文文件...]
+ask_role() {
+  local role="$1" question="$2"; shift 2
+  local rf; rf="$(role_file "$role")"
+  [ -f "$rf" ] || { warn "没有这个角色：$role"; return 1; }
+
+  # 群聊最近的内容也带上——不带的话，每个角色都只知道自己说过什么，
+  # 那就不是一个组织，是二十一个互不相干的顾问。
+  # NO_GROUP_CHAT=1 的活不喂群聊：像行业报告这种议题跟当前项目无关的，
+  # 群聊里别的项目的事会把它带跑偏——实测它读完就去汇报别的项目进度了。
+  if [ "${NO_GROUP_CHAT:-0}" != "1" ]; then
+    local gc; gc="$(group_chat_recent)"
+    [ -n "$gc" ] && set -- "$@" "$gc"
+  fi
+
+  local sf; sf="$(role_session "$role")"
+  local tmp; tmp="$STATE_DIR/ask-$role.md"
+  local -a CLAUDE_EXTRA_ARGS
+
+  # ROLE_ISOLATED=1 → 这一次开全新会话，不接上次。
+  #
+  # 为什么要分两种：
+  #   问答（ask）需要连续性——不连续就每次从头解释一遍。
+  #   干活（派活）需要隔离——一件活是一个自包含的任务包，
+  #   十件活堆在同一个会话里，会越干越贵，而且第一件活里的
+  #   错误假设会一直粘着往后走（判断漂移）。
+  #
+  # 干活的持久化靠【产物】，不靠"记住"——交付物在文件里，
+  # 下次要用就把文件读进来，比让它记着可靠得多。
+  if [ "${ROLE_ISOLATED:-0}" = "1" ]; then
+    local uuid; uuid="$(new_uuid)"
+    CLAUDE_EXTRA_ARGS=(--session-id "$uuid")
+    { cat "$rf"; printf '\n\n---- 现在问你这件事 ----\n%s\n' "$question"; } > "$tmp"
+  elif [ -s "$sf" ]; then
+    # 接着上次的对话。
+    #
+    # 这里只发一句身份提醒，不重发完整角色定义——实测过：
+    # 每次重发完整定义，它会把那当成一条全新指令，于是重新推导出
+    # 跟上次一模一样的回答，而不是接着往下推进。
+    # 身份靠对话历史带着走就够了（"47"那个测试证明历史是在的）。
+    CLAUDE_EXTRA_ARGS=(-r "$(cat "$sf")")
+    { printf '（还是你，%s。接着上次说，不用从头重复立场。）\n\n' "$role"
+      printf '%s\n' "$question"; } > "$tmp"
+  else
+    # 第一次：钉住会话，发完整角色定义。
+    # 身份必须写在正文里——实测 --append-system-prompt 压不过 CLAUDE.md。
+    local uuid; uuid="$(new_uuid)"
+    printf '%s' "$uuid" > "$sf"
+    CLAUDE_EXTRA_ARGS=(--session-id "$uuid")
+    { cat "$rf"; printf '\n\n---- 现在问你这件事 ----\n%s\n' "$question"; } > "$tmp"
+  fi
+
+  # 这个角色自己的环境变量（接别家服务就写这儿），只影响他一个人
+  local ef; ef="$(role_env "$role")"
+
+  # 这个角色自己的模型（写在角色定义里的「模型：xxx」）。
+  #
+  # 接口文件里指定了模型就以接口为准——角色定义里那行是给官方用的，
+  # 强行传 --model sonnet 给别家接口，等于点了一道人家菜单上没有的菜。
+  local m; m="$(role_model "$role")"
+  if [ -n "$m" ] && ! { [ -f "$ef" ] && grep -q '^ANTHROPIC_MODEL=' "$ef"; }; then
+    CLAUDE_EXTRA_ARGS+=(--model "$m")
+  fi
+
+  if [ -f "$ef" ]; then
+    # 在子 shell 里 source，跑完就没了，不污染别人——这是"每人一个接口"的关键。
+    # 代价是子 shell 里的赋值出不来，所以 LAST_LOG 要从文件里捡回来。
+    # shellcheck disable=SC1090
+    ( set -a; . "$ef"; set +a
+      LOG_SUBDIR="roles/$role" claude_run "$tmp" "$@" )
+    local rc=$?
+    LAST_LOG="$(state_get last_log)"
+    return "$rc"
+  fi
+
+  LOG_SUBDIR="roles/$role" claude_run "$tmp" "$@"
+}
+
+# ---------- 任务清单进度 ----------
+# grep -c 在"无匹配"时会输出 0 但返回码非 0，在"文件不存在"时什么都不输出，
+# 所以统一兜底成 0，避免后面做算术时炸掉。
+
+# 任务清单末尾有一节「怎么验收这一步」，里面也是 - [ ] 格式，
+# 但那是给人对照着检查的，不是要 AI 去做的任务。
+# 不排掉的话有两个后果：①任务数虚高，进度全是假的
+# ②自动循环走到最后会真的去"做"验收项，比如
+#   「所有任务都是 - [ ] 开头的标准格式」——这条根本没法做，循环就死在这儿。
+tasks_region() {
+  awk '/^##[[:space:]]*怎么验收/ { exit } { print }' "$TASKS_FILE" 2>/dev/null
+}
+
+_count() {
+  local n
+  n="$(tasks_region | grep -cE "$1" 2>/dev/null || true)"
+  echo "${n:-0}"
+}
+tasks_total()   { _count '^[[:space:]]*- \[[ xX]\] '; }
+tasks_done()    { _count '^[[:space:]]*- \[[xX]\] '; }
+tasks_open()    { _count '^[[:space:]]*- \[ \] '; }
+next_task() {
+  tasks_region | grep -m1 -E '^[[:space:]]*- \[ \] ' 2>/dev/null \
+    | sed -E 's/^[[:space:]]*- \[ \] //' || true
+}
+
+# 一条任务在清单里常常是好几行：第一行是标题，后面缩进的是细节。
+# 只拿第一行会把关键信息切掉（比如"要你回答什么"正好在第二行），
+# 所以连着续行一起取。
+next_task_block() {
+  tasks_region | awk '
+    /^[[:space:]]*- \[ \] / && !found { found=1; print; next }
+    found && /^[[:space:]]*- \[[ xX]\] / { exit }
+    found && /^#/ { exit }
+    found { print }
+  ' | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}'
+}
+
+# 任务清单里有两种任务，AI 干不了，只有人能干：
+#   【需要你回答】  要你提供它不可能知道的事实（你的经历、你的预算、你的偏好）
+#   【停下来给我看】 要你亲眼验一遍，它自己说"做完了"不算数
+#
+# 为什么要专门认这两个标记：第一次真跑第9步的时候，任务清单第一条就是
+# 【需要你回答】。循环照样派 AI 去做，AI 很正确地拒绝替人编，把问题问了出来——
+# 但问题落在日志里没人看，循环只看到"任务没被勾掉"，于是报「可能它忘了勾」，
+# 还建议人"手动勾掉这条"。三个错叠一起：冤枉了它、问题被吞掉、31 个任务卡在 0。
+#
+# 分不清「这条得等人」和「它偷懒」，整个第9步就废了。
+HUMAN_GATE_RE='【需要你回答】|【停下来给我看】'
+task_is_human_gated() { printf '%s' "$1" | grep -qE "$HUMAN_GATE_RE"; }
+tasks_human_gated()   { _count "^[[:space:]]*- \[ \] .*(${HUMAN_GATE_RE})"; }
+
+
+▼▼▼ FILE: scripts/check.sh ▼▼▼
+#!/usr/bin/env bash
+# 「这东西还能正常跑吗」检查器。
+#
+# 关键点：这个模板一开始不知道你要用什么技术（第8步才定），
+# 所以这里靠看有没有对应的文件来猜项目类型，猜到什么跑什么。
+# 全部通过返回 0，任何一项失败返回 1。loop.sh 靠这个返回值决定要不要自动修。
+#
+# 想加自己的检查？在项目根目录建一个 check.local.sh，会在最后自动执行。
+
+set -uo pipefail   # 注意：故意不加 -e，我们要跑完所有检查再汇总
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+FAILED=0
+RAN=0
+
+run() {
+  local label="$1"; shift
+  RAN=$((RAN+1))
+  printf '\n=== %s ===\n' "$label"
+  printf '$ %s\n' "$*"
+  if "$@"; then
+    printf '[通过] %s\n' "$label"
+  else
+    printf '[失败] %s\n' "$label"
+    FAILED=1
+  fi
+}
+
+# 只在命令存在时才跑，避免因为没装某个工具就误判为"代码有问题"
+has() { command -v "$1" >/dev/null 2>&1; }
+
+# 「本来该检查、但没能检查」要记下来，最后一起说。
+# 不记的话就会出现最坏的情况：什么都没验，屏幕上却写着"全部通过"。
+SKIPPED=()
+skip() { SKIPPED+=("$1"); }
+
+# ---------------- Python ----------------
+# 找 .py 要往下翻子目录。只看根目录的话，代码放在 src/ 里就完全看不见——
+# 真跑的时候就是这样：src/unread.py + tests/test_unread.py 都在，
+# check.sh 一个 Python 检查都没跑，还报了"全部通过"。
+has_py=0
+[ -f pyproject.toml ] || [ -f requirements.txt ] && has_py=1
+if [ "$has_py" = 0 ] && [ -n "$(find . -name '*.py' -not -path '*/.*' -not -path '*/node_modules/*' -print -quit 2>/dev/null)" ]; then
+  has_py=1
+fi
+
+if [ "$has_py" = 1 ]; then
+  if has uv && [ -f pyproject.toml ]; then
+    if uv run python -c "import pytest" 2>/dev/null; then
+      run "Python 测试 (pytest)" uv run pytest -q
+    else
+      skip "Python 测试：没装 pytest（uv 环境里），测试没跑"
+    fi
+    uv run ruff --version >/dev/null 2>&1 && run "Python 代码规范 (ruff)" uv run ruff check .
+  elif has pytest; then
+    # 让 pytest 自己去找测试，别写死只看 tests/ 目录。
+    # 退出码 5 = 一个测试都没收集到，那是"没测试可跑"，不是"测试挂了"。
+    pytest -q; rc=$?
+    RAN=$((RAN+1))
+    printf '\n=== %s ===\n$ %s\n' "Python 测试 (pytest)" "pytest -q"
+    case "$rc" in
+      0) printf '[通过] Python 测试 (pytest)\n' ;;
+      5) printf '[跳过] 有 Python 代码，但一个测试都没找到\n'
+         RAN=$((RAN-1)); skip "Python 测试：有 .py 文件但没有任何测试，等于没验" ;;
+      *) printf '[失败] Python 测试 (pytest)\n'; FAILED=1 ;;
+    esac
+  else
+    skip "Python 测试：这台机器上没有 pytest 命令，测试没跑"
+  fi
+  has ruff && run "Python 代码规范 (ruff)" ruff check .
+fi
+
+# ---------------- Node / TypeScript ----------------
+if [ -f package.json ]; then
+  PM=npm
+  [ -f pnpm-lock.yaml ] && has pnpm && PM=pnpm
+  [ -f yarn.lock ] && has yarn && PM=yarn
+
+  # 只跑 package.json 里真的定义了的脚本
+  has_script() { node -e "process.exit(require('./package.json').scripts?.['$1']?0:1)" 2>/dev/null; }
+
+  if has node; then
+    has_script typecheck && run "类型检查" $PM run typecheck
+    has_script lint      && run "代码规范"   $PM run lint
+    has_script test      && run "测试"       $PM run test
+    has_script build     && run "能否打包"   $PM run build
+  fi
+fi
+
+# ---------------- Go ----------------
+if [ -f go.mod ] && has go; then
+  run "Go 编译" go build ./...
+  run "Go 测试" go test ./...
+fi
+
+# ---------------- Rust ----------------
+if [ -f Cargo.toml ] && has cargo; then
+  run "Rust 编译" cargo build --quiet
+  run "Rust 测试" cargo test --quiet
+fi
+
+# ---------------- Shell 脚本 ----------------
+# 注意：git ls-files 在文件还没提交时会「成功地返回空」，不能靠 || 兜底，
+# 必须看结果是不是空的，否则新项目里这段检查会静默失效。
+list_shell_files() {
+  local -a f=()
+  if git rev-parse --git-dir >/dev/null 2>&1; then
+    mapfile -t f < <(git ls-files '*.sh' 2>/dev/null)
+  fi
+  if [ "${#f[@]}" -eq 0 ]; then
+    mapfile -t f < <(find . -name '*.sh' -not -path './.git/*' -not -path './node_modules/*' 2>/dev/null)
+  fi
+  printf '%s\n' "${f[@]+"${f[@]}"}"
+}
+
+mapfile -t SH < <(list_shell_files)
+# find 在没结果时会产生一个空行，过滤掉
+SH=("${SH[@]+"${SH[@]}"}")
+FILTERED=()
+for f in "${SH[@]+"${SH[@]}"}"; do [ -n "$f" ] && [ -f "$f" ] && FILTERED+=("$f"); done
+SH=("${FILTERED[@]+"${FILTERED[@]}"}")
+
+if [ "${#SH[@]}" -gt 0 ]; then
+  has shellcheck && run "Shell 脚本检查" shellcheck "${SH[@]}"
+
+  # 语法检查：不依赖任何外部工具，bash 自带
+  RAN=$((RAN+1))
+  printf '\n=== Shell 语法 ===\n'
+  syn_ok=1
+  for f in "${SH[@]}"; do
+    bash -n "$f" || { printf '[失败] %s 语法有问题\n' "$f"; syn_ok=0; }
+  done
+  if [ "$syn_ok" = 1 ]; then printf '[通过] Shell 语法\n'; else FAILED=1; fi
+fi
+
+# ---------------- MoneyLoop 自己的检查 ----------------
+# 「每个员工是不是真的一个独立接口」。
+# 这条必须每次都跑：换接口最坏的失败方式不是报错，是【看起来换了其实没换】——
+# 你以为在用便宜的，其实一直在烧贵的，而且账面上看不出来。
+if [ -f scripts/test-接口.sh ]; then
+  run "接口隔离（每个员工一个独立接口）" bash scripts/test-接口.sh
+fi
+
+# 第1步「听懂」。两头都要守住：没听懂却往下走了，和问个没完出不来。
+# 顺带守住十步清单那三份拷贝不漂移。
+if [ -f scripts/test-听懂.sh ]; then
+  run "第1步 听懂（引导式问答 ＋ 十步清单不漂移）" bash scripts/test-听懂.sh
+fi
+
+# 论证：十个专家把「这事到底成不成」查一遍。
+# 里面第一条测的是「角色到底收没收到自己的身份和问题」——
+# 那条曾经悄悄坏了，每个角色只收到了自己定义的第一行。
+if [ -f scripts/test-论证.sh ]; then
+  run "论证（十个专家 ＋ 角色真收到了提示词）" bash scripts/test-论证.sh
+fi
+
+# 蓝图的收敛循环。最要紧的一条：它不许自己说"定了"——
+# 拍板必须是用户亲口说的。它替你拍板，等于这整个循环白做。
+if [ -f scripts/test-蓝图.sh ]; then
+  run "蓝图收敛循环（改到你说就是它了）" bash scripts/test-蓝图.sh
+fi
+
+# ---------------- 项目自定义检查 ----------------
+if [ -f check.local.sh ]; then
+  run "项目自定义检查" bash check.local.sh
+fi
+
+# ---------------- 汇总 ----------------
+printf '\n────────────────────────────\n'
+
+# 先说没检查成的。「全部通过」如果底下压着一堆没跑的检查，
+# 那是最坏的一种假象——比直接失败还危险，因为你会以为它验过了。
+if [ "${#SKIPPED[@]}" -gt 0 ]; then
+  printf '注意，下面这些本来该检查、但没检查成：\n'
+  for s in "${SKIPPED[@]}"; do printf '  · %s\n' "$s"; done
+  printf '\n'
+fi
+
+if [ "$RAN" -eq 0 ]; then
+  printf '还没有任何可跑的检查（项目里还没有测试）。\n'
+  printf '这不算失败，但等有代码了就该补测试了——没有测试，自动循环就没法判断做对没有。\n'
+  exit 0
+fi
+if [ "$FAILED" -eq 0 ]; then
+  printf '全部通过（共 %s 项检查）\n' "$RAN"
+  exit 0
+else
+  printf '有检查没通过（共 %s 项）。上面标着 [失败] 的就是。\n' "$RAN"
+  exit 1
+fi
+
+
+▼▼▼ FILE: scripts/状态.py ▼▼▼
+#!/usr/bin/env python3
+# 把 .loop/ 和 docs/ 里的真实状态读成一个字典。
+#
+# 为什么单独抽出来：看板（静态 HTML）和面板（能点的界面）都要读同一批状态。
+# 各写一份的话，迟早有一天两边显示的数字不一样，
+# 而你没法知道哪个是真的——那比没有看板更糟。
+#
+# 这个文件只读，不写任何东西。
+
+import os
+import re
+import glob
+import subprocess
+
+def rd(p, default=""):
+    try:
+        with open(p, encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return default
+
+def rdl(p):
+    return [x for x in rd(p).splitlines() if x.strip()]
+
+# 下面这三张表是从 scripts/lib.sh 抄过来的（STAGES / stage_needs_signoff / stage_doc）。
+#
+# 抄一份就有漂移的风险：哪天 lib.sh 改了这儿没跟着改，界面上显示的
+# 进度、拍板闸门、文档名就全是错的，而且【看不出来是错的】。
+# 所以 scripts/test-听懂.sh 里有一条硬测试，逐项对着 lib.sh 比。改这儿必须两边一起改。
+STAGES = [("听懂", "先听懂你要什么"), ("goal", "目标和算账"), ("giants", "站在巨人肩上"),
+          ("edge", "共性与独特"), ("taste", "什么算好"), ("spec", "要做什么"),
+          ("unknowns", "我不懂的"), ("stack", "技术与落地"), ("plan", "任务清单"),
+          ("build", "自动开做"), ("done", "完成")]
+
+# 这几步是生意问题，只有人能定。
+SIGNOFF = {"听懂", "edge", "taste", "spec", "stack"}
+
+# 每一步产出哪份文档。
+STAGE_DOC = {
+    "听懂": "00-听到的.md",
+    "goal": "00-目标.md", "giants": "01-巨人的肩膀.md", "edge": "02-共性与独特.md",
+    "taste": "03-什么算好.md", "spec": "04-要做什么.md", "unknowns": "05-我不懂的.md",
+    "stack": "06-技术与落地.md", "plan": "07-任务清单.md",
+}
+
+def _field(text, key):
+    m = re.search(r"^%s(.+)$" % key, text, re.M)
+    return m.group(1).strip() if m else ""
+
+def _roles_in(root, d):
+    L = os.path.join(root, ".loop")
+    out = []
+    for f in sorted(glob.glob(os.path.join(d, "*.md"))):
+        n = os.path.basename(f)[:-3]
+        t = rd(f)
+        env = rd(f[:-3] + ".env")
+        pv = _field(env, "LOOP_PROVIDER=")
+        if env and not pv:
+            pv = "自定义"
+        logs = sorted(glob.glob(os.path.join(L, "log", "roles", n, "*.log")))
+        out.append(dict(
+            name=n,
+            layer=_field(t, "层："),
+            one=_field(t, "一句话："),
+            typ=_field(t, "类型："),
+            model=_field(t, "模型："),
+            context=_field(t, "上下文："),
+            provider=pv or "官方",
+            switched=bool(pv),
+            logs=len(logs),
+            body=t,
+        ))
+    return out
+
+def providers(root):
+    """供应商表。唯一的真身在 lib.sh 里，这儿只是问它要。"""
+    try:
+        r = subprocess.run(
+            ["bash", "-c", '. "$1/scripts/lib.sh"; provider_dump', "_", root],
+            capture_output=True, text=True, timeout=10, cwd=root)
+        rows = []
+        for line in r.stdout.splitlines():
+            p = line.split("|")
+            if len(p) >= 6 and p[0]:
+                rows.append(dict(code=p[0], name=p[1], url=p[2],
+                                 big=p[3], small=p[4], verified=p[5]))
+        return rows
+    except Exception:
+        return []
+
+def read_all(root):
+    L, D = os.path.join(root, ".loop"), os.path.join(root, "docs")
+
+    stage = rd(os.path.join(L, "stage"), STAGES[0][0]).strip() or STAGES[0][0]
+    keys = [s for s, _ in STAGES]
+    stage_i = keys.index(stage) if stage in keys else 0
+
+    # ---------- 钱 ----------
+    cost_rows, spent = [], 0.0
+    for i, line in enumerate(rdl(os.path.join(L, "cost.tsv"))):
+        if i == 0:
+            continue
+        p = line.split("\t")
+        if len(p) >= 4:
+            try:
+                c = float(p[2])
+            except ValueError:
+                continue
+            spent += c
+            # 第5列是「这笔走的谁家接口」。老账单没这列，当官方。
+            cost_rows.append(dict(time=p[0], who=p[1], cost=c, secs=p[3],
+                                  provider=p[4] if len(p) >= 5 else "官方"))
+    by_who = {}
+    for r in cost_rows:
+        by_who[r["who"]] = by_who.get(r["who"], 0) + r["cost"]
+
+    # 走别家接口的那几笔，美元数是按官方价目表折算的，不是真花的钱。
+    # 这个必须一路带到界面上，不然账面上就是一笔很正经的假账。
+    off = {}
+    for r in cost_rows:
+        if r["provider"] and r["provider"] != "官方":
+            off[r["provider"]] = off.get(r["provider"], 0) + 1
+
+    budget = rd(os.path.join(L, "budget"), "").strip()
+
+    # ---------- 账本（上线之后的真金白银，跟 AI 调用费是两回事）----------
+    inc = exp = 0.0
+    led = []
+    for i, line in enumerate(rdl(os.path.join(L, "账本.tsv"))):
+        if i == 0:
+            continue
+        q = line.split("\t")
+        if len(q) >= 3:
+            try:
+                v = float(q[2])
+            except ValueError:
+                continue
+            if q[1] == "收":
+                inc += v
+            else:
+                exp += v
+            led.append(dict(date=q[0], kind=q[1], amount=v,
+                            note=q[3] if len(q) >= 4 else ""))
+
+    # ---------- 人 ----------
+    on = _roles_in(root, os.path.join(L, "roles"))
+    arch = _roles_in(root, os.path.join(L, "封存"))
+    pool_files = sorted(glob.glob(os.path.join(root, "roles-模板", "*.md")))
+    pool = []
+    for f in pool_files:
+        t = rd(f)
+        pool.append(dict(name=os.path.basename(f)[:-3],
+                         layer=_field(t, "层："), one=_field(t, "一句话：")))
+    on_names = {r["name"] for r in on}
+
+    # ---------- 群聊 ----------
+    chat = []
+    for m in re.finditer(
+            r"^\*\*(\d\d-\d\d \d\d:\d\d) · (.+?)\*\*\n+(.*?)(?=\n\*\*\d\d-\d\d |\Z)",
+            rd(os.path.join(D, "10-群聊.md")), re.S | re.M):
+        body = re.sub(r"^> ?", "", m.group(3).strip(), flags=re.M)
+        chat.append(dict(time=m.group(1), who=m.group(2), body=body))
+
+    # ---------- 派活台账 ----------
+    tasks = []
+    for i, line in enumerate(rdl(os.path.join(L, "tasks.tsv"))):
+        if i == 0:
+            continue
+        p = line.split("\t")
+        if len(p) >= 6:
+            tasks.append(dict(id=p[0], who=p[1], what=p[2],
+                              state=p[3], deliver=p[4], time=p[5]))
+
+    # ---------- 项目任务清单 ----------
+    tl = rd(os.path.join(D, "07-任务清单.md")).split("## 怎么验收")[0]
+    todo = []
+    for m in re.finditer(r"^\s*- \[([ xX])\] (.+)$", tl, re.M):
+        text = m.group(2).strip()
+        todo.append(dict(done=m.group(1).lower() == "x", text=text,
+                         gated=bool(re.search(r"【需要你回答】|【停下来给我看】", text))))
+    t_done = len([t for t in todo if t["done"]])
+    t_open = len([t for t in todo if not t["done"]])
+    t_gate = len([t for t in todo if not t["done"] and t["gated"]])
+
+    # ---------- 标准修订（双环学习：标准本身有没有被改过） ----------
+    rev = 0
+    m = re.search(r"^##\s*标准修订记录(.*?)(?=^##\s|\Z)",
+                  rd(os.path.join(D, "03-什么算好.md")), re.S | re.M)
+    if m:
+        rows = [r for r in m.group(1).splitlines() if r.strip().startswith("|")]
+        rev = len([r for r in rows[2:] if re.sub(r"[|\s\-]", "", r)])
+
+    # ---------- 十步 ----------
+    steps = []
+    for i, (k, label) in enumerate(STAGES):
+        doc = STAGE_DOC.get(k, "")
+        docpath = os.path.join(D, doc) if doc else ""
+        steps.append(dict(
+            key=k, label=label, n=i,      # 听懂=第0步，goal=第1步…
+            state="done" if i < stage_i else "now" if i == stage_i else "todo",
+            signoff=k in SIGNOFF,
+            signed=rd(os.path.join(L, "signoff_" + k), "no").strip() == "yes",
+            ran=rd(os.path.join(L, "ran_" + k), "no").strip() == "yes",
+            doc=doc,
+            has_doc=bool(doc) and os.path.isfile(docpath),
+        ))
+
+    return dict(
+        idea=rd(os.path.join(L, "原始想法.txt"), "").strip(),
+        stage=stage, stage_index=stage_i, steps=steps,
+        closed=rd(os.path.join(L, "closed"), "no").strip() == "yes",
+        started=os.path.isdir(L) and bool(rd(os.path.join(L, "stage")).strip()),
+        budget=budget, spent=round(spent, 4),
+        income=round(inc, 2), outgo=round(exp, 2), net=round(inc - exp, 2),
+        ledger=led[-30:],
+        stoploss=rd(os.path.join(L, "止损线"), "").strip(),
+        cost_rows=cost_rows[-200:],
+        by_who=sorted(by_who.items(), key=lambda x: -x[1]),
+        off_providers=off,
+        roles=on, archived=arch, pool=pool,
+        not_hired=[p for p in pool if p["name"] not in on_names],
+        chat=chat[-120:], tasks=tasks, todo=todo,
+        todo_done=t_done, todo_open=t_open, todo_gate=t_gate,
+        revisions=rev,
+        providers=providers(root),
+    )
+
+def doc_text(root, name):
+    """读 docs/ 下的一份文档。只许读 docs/ 和 references/，别的一律不给。"""
+    base = os.path.realpath(root)
+    for sub in ("docs", "references", "work"):
+        p = os.path.realpath(os.path.join(base, sub, name))
+        if p.startswith(os.path.join(base, sub) + os.sep) and os.path.isfile(p):
+            return rd(p)
+    return ""
+
+
+▼▼▼ FILE: scripts/看板.py ▼▼▼
+#!/usr/bin/env python3
+# 从真实状态生成一个本地看板 HTML。
+#
+# 为什么是本地 HTML 不是网页服务：这套东西是你机器上的一个脚本，
+# 没有常驻服务。生成一个自包含的 .html，双击就开，
+# 想刷新就再跑一次 ./loop.sh 看板。零依赖、断网能用、不会挂。
+#
+# 它只读，不写任何状态——看板坏了不影响 loop 跑。
+
+import os
+import re
+import sys
+import html
+import glob
+import datetime
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# 十步的清单只有一份真身，在 状态.py 里（它又对着 lib.sh 有防漂移测试）。
+# 这儿曾经自己抄了一份，加「第0步 听懂」的时候就漏了——
+# 结果是看板上的进度条比实际少一格，而且看不出来是错的。
+from 状态 import STAGES  # noqa: E402
+
+ROOT = sys.argv[1] if len(sys.argv) > 1 else "."
+L, D = os.path.join(ROOT, ".loop"), os.path.join(ROOT, "docs")
+
+def rd(p, default=""):
+    try:
+        with open(p, encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return default
+
+def rdl(p):
+    return [x for x in rd(p).splitlines() if x.strip()]
+
+stage = rd(os.path.join(L,"stage"),STAGES[0][0]).strip() or STAGES[0][0]
+idea  = rd(os.path.join(L,"原始想法.txt"),"（还没开始）").strip()
+budget= rd(os.path.join(L,"budget"),"").strip()
+closed= rd(os.path.join(L,"closed"),"no").strip() == "yes"
+
+# ---------- 钱 ----------
+cost_rows, spent = [], 0.0
+for i, line in enumerate(rdl(os.path.join(L,"cost.tsv"))):
+    if i == 0:
+        continue
+    p = line.split("\t")
+    if len(p) >= 4:
+        try:
+            c = float(p[2])
+        except ValueError:
+            continue
+        spent += c
+        # 第5列是「这笔走的谁家接口」。老的账单没有这一列，当官方处理。
+        cost_rows.append((p[0], p[1], c, p[3], p[4] if len(p) >= 5 else "官方"))
+by_who = {}
+for _, who, c, _s, _pv in cost_rows:
+    by_who[who] = by_who.get(who, 0) + c
+top_cost = sorted(by_who.items(), key=lambda x: -x[1])[:8]
+
+# 走了别家接口的，这里的美元数不作数——claude 是按 Anthropic 价目表算的，
+# 它不知道别家收多少钱。不标出来，看板上就是一笔很正经的假账。
+off_providers = {}
+for _t, _w, _c, _s, pv in cost_rows:
+    if pv and pv != "官方":
+        off_providers[pv] = off_providers.get(pv, 0) + 1
+
+# ---------- 人 ----------
+def roles_in(d):
+    out = []
+    for f in sorted(glob.glob(os.path.join(d, "*.md"))):
+        n = os.path.basename(f)[:-3]
+        t = rd(f)
+        layer = (re.search(r"^层：(.+)$", t, re.M) or [None,""])[1].strip() if re.search(r"^层：", t, re.M) else ""
+        one   = (re.search(r"^一句话：(.+)$", t, re.M) or [None,""])[1].strip() if re.search(r"^一句话：", t, re.M) else ""
+        typ   = (re.search(r"^类型：(.+)$", t, re.M) or [None,""])[1].strip() if re.search(r"^类型：", t, re.M) else ""
+        model = (re.search(r"^模型：(.+)$", t, re.M) or [None,""])[1].strip() if re.search(r"^模型：", t, re.M) else ""
+        logs  = len(glob.glob(os.path.join(L,"log","roles",n,"*.log")))
+        # 这个人用谁家的 AI。有 .env 就是换过接口的，没有就是官方。
+        # 组织图上必须能一眼看出来——"我以为客服在用便宜的"
+        # 和"客服真的在用便宜的"，是两回事。
+        env = rd(f[:-3] + ".env")
+        pv = (re.search(r"^LOOP_PROVIDER=(.+)$", env, re.M) or [None,""])[1].strip() if env else ""
+        if env and not pv:
+            pv = "自定义"
+        out.append(dict(name=n, layer=layer, one=one, typ=typ,
+                        model=model, logs=logs, provider=pv))
+    return out
+
+on   = roles_in(os.path.join(L,"roles"))
+arch = roles_in(os.path.join(L,"封存"))
+pool = [os.path.basename(f)[:-3] for f in sorted(glob.glob(os.path.join(ROOT,"roles-模板","*.md")))]
+on_names = {r["name"] for r in on}
+
+def group(rs, layer): return [r for r in rs if r["layer"] == layer]
+staff_adv  = group(on,"参谋")
+staff_exec = group(on,"执行")
+staff_dist = group(on,"蒸馏")
+not_hired  = [p for p in pool if p not in on_names]
+
+# ---------- 群聊 ----------
+chat = []
+for m in re.finditer(r"^\*\*(\d\d-\d\d \d\d:\d\d) · (.+?)\*\*\n+(.*?)(?=\n\*\*\d\d-\d\d |\Z)",
+                     rd(os.path.join(D,"10-群聊.md")), re.S|re.M):
+    body = m.group(3).strip()
+    body = re.sub(r"^> ?", "", body, flags=re.M)
+    chat.append((m.group(1), m.group(2), body))
+chat = chat[-40:]
+
+# ---------- 台账 ----------
+tasks = []
+for i, line in enumerate(rdl(os.path.join(L,"tasks.tsv"))):
+    if i == 0:
+        continue
+    p = line.split("\t")
+    if len(p) >= 6:
+        tasks.append(p)
+
+# ---------- 项目任务清单 ----------
+tl = rd(os.path.join(D,"07-任务清单.md"))
+tl = tl.split("## 怎么验收")[0]
+t_done = len(re.findall(r"^\s*- \[[xX]\] ", tl, re.M))
+t_open = len(re.findall(r"^\s*- \[ \] ", tl, re.M))
+t_gate = len(re.findall(r"^\s*- \[ \] .*(【需要你回答】|【停下来给我看】)", tl, re.M))
+
+# ---------- 标准修订 ----------
+rev = 0
+m = re.search(r"^##\s*标准修订记录(.*?)(?=^##\s|\Z)", rd(os.path.join(D,"03-什么算好.md")), re.S|re.M)
+if m:
+    rows = [r for r in m.group(1).splitlines() if r.strip().startswith("|")]
+    rev = len([r for r in rows[2:] if re.sub(r"[|\s\-]", "", r)])
+
+e = html.escape
+def pct(a,b): return 0 if not b else round(a*100/b)
+
+def person(r, extra=""):
+    tag = f'<span class="t">{e(r["typ"])}</span>' if r["typ"] else ""
+    mdl = f'<span class="m">{e(r["model"])}</span>' if r["model"] else ""
+    pv  = f'<span class="pv">{e(r.get("provider",""))}</span>' if r.get("provider") else ""
+    n = f'<span class="n">{r["logs"]}</span>' if r["logs"] else ""
+    return (f'<div class="p {extra}"><div class="ph"><b>{e(r["name"])}</b>{tag}{mdl}{pv}{n}</div>'
+            f'<div class="po">{e(r["one"])}</div></div>')
+
+stage_i = [s for s,_ in STAGES].index(stage) if stage in [s for s,_ in STAGES] else 0
+steps = "".join(
+    f'<div class="st {"done" if i<stage_i else "now" if i==stage_i else ""}">'
+    f'<i>{i if i < len(STAGES)-1 else "✓"}</i><span>{e(t)}</span></div>'
+    for i,(s,t) in enumerate(STAGES))
+
+chat_html = "".join(
+    f'<div class="msg {"me" if w=="你" or w.startswith("你 ") else "sys" if w=="系统" else "ceo" if "CEO" in w else ""}">'
+    f'<div class="mh"><b>{e(w)}</b><time>{e(t)}</time></div>'
+    f'<div class="mb">{e(b[:700])}{"…" if len(b)>700 else ""}</div></div>'
+    for t,w,b in reversed(chat)) or '<p class="empty">还没有人说话。<code>./loop.sh say "话"</code></p>'
+
+task_html = "".join(
+    f'<tr><td class="num">#{e(t[0])}</td><td>{e(t[1])}</td>'
+    f'<td><span class="badge b{"ok" if t[3]=="干完了" else "no" if t[3]=="没交东西" else "run"}">{e(t[3])}</span></td>'
+    f'<td class="dim">{e(t[2][:46])}</td></tr>' for t in reversed(tasks)) or \
+    '<tr><td colspan="4" class="empty">还没派过活</td></tr>'
+
+cost_html = "".join(
+    f'<tr><td>{e(w)}</td><td class="num">${c:.2f}</td>'
+    f'<td class="bar"><i style="width:{pct(c, top_cost[0][1])}%"></i></td></tr>'
+    for w,c in top_cost) or '<tr><td colspan="3" class="empty">还没花钱</td></tr>'
+
+if off_providers:
+    which = "、".join(f"{k}（{v} 次）" for k, v in off_providers.items())
+    cost_html += (
+        '<tr><td colspan="3" class="warnrow">'
+        f'这里面有一部分<b>不作数</b>：{e(which)}走的不是官方接口，'
+        '美元数是按官方价目表折算的，不是你真付的钱。真实花费去那家后台看。'
+        '</td></tr>')
+
+# ---------- 上线之后的真账（跟 AI 调用费是两回事，不许混）----------
+inc = exp = 0.0
+led = []
+for i, line in enumerate(rdl(os.path.join(L, "账本.tsv"))):
+    if i == 0:
+        continue
+    q = line.split("\t")
+    if len(q) >= 3:
+        try:
+            v = float(q[2])
+        except ValueError:
+            continue
+        if q[1] == "收":
+            inc += v
+        else:
+            exp += v
+        led.append((q[0], q[1], v, q[3] if len(q) >= 4 else ""))
+net = inc - exp
+stoploss = rd(os.path.join(L, "止损线"), "").strip()
+
+biz_html = ""
+if led or stoploss:
+    rows = "".join(
+        f'<tr><td class="num">{e(d)}</td>'
+        f'<td style="color:{"var(--ok)" if k=="收" else "var(--ink3)"}">{e(k)}</td>'
+        f'<td class="num">{v:.2f}</td><td class="dim">{e(n[:28])}</td></tr>'
+        for d, k, v, n in reversed(led[-12:])) or \
+        '<tr><td colspan="4" class="empty">还没记过账</td></tr>'
+    sl = f'<div class="warnrow">止损线：{e(stoploss)}</div>' if stoploss else \
+         '<div class="warnrow">还没定止损线 —— <code>./loop.sh 止损 "…"</code></div>'
+    biz_html = (
+        '<div class="card"><h2>生意怎么样（上线之后的真账）</h2>'
+        f'<div class="kpi" style="margin-bottom:12px">'
+        f'<div class="k ok"><b>{inc:.0f}</b><span>收入</span></div>'
+        f'<div class="k"><b>{exp:.0f}</b><span>支出</span></div>'
+        f'<div class="k {"ok" if net >= 0 else "warn"}"><b>{net:.0f}</b><span>净</span></div>'
+        f'</div>{sl}<table>{rows}</table></div>')
+
+bud = f'{spent:.2f} / {budget}' if budget else f'{spent:.2f}（没设上限）'
+bud_pct = pct(spent, float(budget)) if budget else 0
+
+HTML = f"""<!doctype html><html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MoneyLoop 看板</title><style>
+*{{box-sizing:border-box}}
+:root{{--bg:#0d141b;--card:#141f29;--card2:#1b2934;--ink:#e3ebf2;--ink2:#9fb2c0;--ink3:#6b8095;
+--line:#233343;--blue:#5aa3d8;--ok:#4fb98a;--warn:#d9a05b;--bad:#d4705f;--purple:#9b8ad4}}
+body{{margin:0;background:var(--bg);color:var(--ink);font:15px/1.65 "PingFang SC","Noto Sans SC","Microsoft YaHei",system-ui,sans-serif}}
+.wrap{{max-width:1500px;margin:0 auto;padding:22px}}
+h1{{font-size:22px;margin:0 0 4px}} h1 small{{color:var(--ink3);font-weight:400;font-size:14px;margin-left:10px}}
+.idea{{color:var(--ink2);margin:0 0 18px;font-size:14.5px}}
+.grid{{display:grid;grid-template-columns:300px 1fr 340px;gap:16px;align-items:start}}
+@media(max-width:1200px){{.grid{{grid-template-columns:1fr}}}}
+.card{{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}}
+.card h2{{font-size:13px;margin:0 0 12px;color:var(--ink3);letter-spacing:.06em;font-weight:600}}
+.steps{{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:16px}}
+.st{{flex:1;min-width:88px;background:var(--card);border:1px solid var(--line);border-radius:7px;padding:8px 9px;font-size:12px;color:var(--ink3)}}
+.st i{{display:block;font-style:normal;font-size:11px;opacity:.6}}
+.st.done{{border-color:#2b5c48;color:var(--ok)}} .st.done i{{color:var(--ok)}}
+.st.now{{border-color:var(--blue);background:#12293a;color:var(--ink)}} .st.now i{{color:var(--blue)}}
+.kpi{{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-bottom:16px}}
+.k{{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:12px 14px}}
+.k b{{display:block;font-size:23px;line-height:1.2;font-variant-numeric:tabular-nums}}
+.k span{{font-size:12px;color:var(--ink3)}}
+.k.ok b{{color:var(--ok)}} .k.warn b{{color:var(--warn)}} .k.blue b{{color:var(--blue)}}
+.prog{{height:5px;background:var(--card2);border-radius:3px;margin-top:8px;overflow:hidden}}
+.prog i{{display:block;height:100%;background:var(--blue)}}
+.prog.hot i{{background:var(--bad)}}
+.lay{{font-size:11.5px;color:var(--ink3);margin:14px 0 7px;letter-spacing:.05em}}
+.lay:first-child{{margin-top:0}}
+.p{{background:var(--card2);border-radius:7px;padding:8px 10px;margin-bottom:5px;border-left:2px solid var(--line)}}
+.p.adv{{border-left-color:var(--blue)}} .p.exe{{border-left-color:var(--warn)}} .p.dis{{border-left-color:var(--purple)}}
+.p.arc{{opacity:.45}}
+.ph{{display:flex;align-items:center;gap:6px;flex-wrap:wrap}} .ph b{{font-size:13.5px}}
+.po{{font-size:11.5px;color:var(--ink3);margin-top:1px;line-height:1.45}}
+.t,.m,.n,.pv{{font-size:10px;padding:1px 5px;border-radius:3px}}
+.t{{background:#1d3547;color:var(--blue)}} .m{{background:#2a2340;color:var(--purple)}}
+.pv{{background:#173a2c;color:var(--ok);font-weight:600}}
+.n{{background:var(--line);color:var(--ink3);margin-left:auto}}
+.warnrow{{font-size:11.5px;color:var(--warn);line-height:1.6;padding-top:9px}}
+.pool{{font-size:12px;color:var(--ink3);line-height:1.9}}
+.pool code{{background:var(--card2);padding:1px 5px;border-radius:3px;color:var(--ink2)}}
+.msg{{border-bottom:1px solid var(--line);padding:11px 0}} .msg:last-child{{border:0}}
+.mh{{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px}}
+.mh b{{font-size:13px;color:var(--blue)}} .mh time{{font-size:11px;color:var(--ink3)}}
+.msg.me .mh b{{color:var(--ok)}} .msg.ceo .mh b{{color:var(--warn)}} .msg.sys .mh b{{color:var(--ink3)}}
+.mb{{font-size:13px;color:var(--ink2);white-space:pre-wrap;word-break:break-word;max-height:190px;overflow:auto}}
+table{{width:100%;border-collapse:collapse;font-size:12.5px}}
+td{{padding:6px 5px;border-bottom:1px solid var(--line);vertical-align:top}}
+.num{{font-variant-numeric:tabular-nums;color:var(--ink3);white-space:nowrap}}
+.dim{{color:var(--ink3)}}
+.badge{{font-size:11px;padding:1px 6px;border-radius:3px;white-space:nowrap}}
+.bok{{background:#16362a;color:var(--ok)}} .bno{{background:#3a2320;color:var(--bad)}} .brun{{background:#1d3547;color:var(--blue)}}
+.bar{{width:74px}} .bar i{{display:block;height:6px;background:var(--blue);border-radius:3px}}
+.empty{{color:var(--ink3);font-size:12.5px;text-align:center;padding:14px 0}}
+.foot{{color:var(--ink3);font-size:12px;margin-top:18px;border-top:1px solid var(--line);padding-top:14px}}
+.foot code{{background:var(--card2);padding:1px 6px;border-radius:3px;color:var(--ink2)}}
+.closed{{background:#3a2320;border-color:var(--bad);color:var(--bad);padding:10px 14px;border-radius:8px;margin-bottom:16px;font-size:13.5px}}
+</style></head><body><div class="wrap">
+
+<h1>MoneyLoop 看板 <small>{datetime.datetime.now():%Y-%m-%d %H:%M} 生成</small></h1>
+<p class="idea">{e(idea[:200])}</p>
+{'<div class="closed">这个项目已结项。复盘在 docs/99-结项.md</div>' if closed else ''}
+
+<div class="steps">{steps}</div>
+
+<div class="kpi">
+  <div class="k blue"><b>{t_done}/{t_done+t_open}</b><span>项目任务做完</span>
+    <div class="prog"><i style="width:{pct(t_done,t_done+t_open)}%"></i></div></div>
+  <div class="k warn"><b>{t_gate}</b><span>只有你能干的</span></div>
+  <div class="k"><b>{len(on)}</b><span>在岗 · 封存 {len(arch)}</span></div>
+  <div class="k {'warn' if bud_pct>=80 else 'ok'}"><b>${bud}</b><span>花了 / 上限</span>
+    {f'<div class="prog {"hot" if bud_pct>=80 else ""}"><i style="width:{min(bud_pct,100)}%"></i></div>' if budget else ''}</div>
+  <div class="k {'ok' if rev else 'warn'}"><b>{rev}</b><span>标准改过几次</span></div>
+</div>
+
+<div class="grid">
+  <div>
+    <div class="card">
+      <h2>组织 · 你 → CEO → 两个分支</h2>
+      <div class="lay">左分支 · 参谋层（只出意见）</div>
+      {"".join(person(r,"adv") for r in staff_adv) or '<p class="empty">还没招</p>'}
+      <div class="lay">右分支 · 执行层（干活交付）</div>
+      {"".join(person(r,"exe") for r in staff_exec) or '<p class="empty">还没招</p>'}
+      {'<div class="lay">蒸馏专家（真人的公开材料）</div>' + "".join(person(r,"dis") for r in staff_dist) if staff_dist else ''}
+      {'<div class="lay">已封存（随时起复）</div>' + "".join(person(r,"arc") for r in arch) if arch else ''}
+    </div>
+    {f'<div class="card"><h2>还没招的</h2><p class="pool">{"、".join(e(p) for p in not_hired)}<br><code>./loop.sh hire 名字</code></p></div>' if not_hired else ''}
+  </div>
+
+  <div class="card">
+    <h2>群聊 · 最近 {len(chat)} 条（新的在上）</h2>
+    {chat_html}
+  </div>
+
+  <div>
+    {biz_html}
+    <div class="card"><h2>派活台账</h2><table>{task_html}</table></div>
+    <div class="card"><h2>钱花在谁身上（共 ${spent:.2f} / {len(cost_rows)} 次）</h2><table>{cost_html}</table></div>
+  </div>
+</div>
+
+<p class="foot">这个看板只读状态，不改任何东西——它坏了不影响 loop 跑。<br>
+想刷新就再跑一次 <code>./loop.sh 看板</code>。跟 CEO 说话：<code>./loop.sh say "你的话"</code></p>
+</div></body></html>"""
+
+out = os.path.join(ROOT, "看板.html")
+with open(out, "w", encoding="utf-8") as f:
+    f.write(HTML)
+print(out)
+
+
+▼▼▼ FILE: scripts/test-接口.sh ▼▼▼
+#!/usr/bin/env bash
+# 「每个员工是不是真的一个独立接口」自测。
+#
+# 为什么必须有这个测试：
+# 换接口这件事，最坏的失败方式不是报错，是【看起来换了但其实没换】——
+# 你以为客服在用便宜的 DeepSeek，实际上他一直在烧官方的钱，
+# 而账单里那个数字还是按官方价目表算的，你完全看不出来。
+#
+# 所以这里不测"命令跑没跑成功"，测的是：
+#   调用这个员工的时候，claude 这个程序【真正收到的环境变量】是什么。
+# 办法是用一个假的 claude，让它把自己收到的环境倒出来。
+#
+# 不花钱、不联网、几秒钟跑完。
+
+set -uo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+FAILED=0
+pass() { printf '  [通过] %s\n' "$1"; }
+fail() { printf '  [失败] %s\n' "$1"; FAILED=1; }
+check() { # check <说明> <期望> <实际>
+  if [ "$2" = "$3" ]; then pass "$1"
+  else fail "$1"; printf '         期望：%s\n         实际：%s\n' "$2" "$3"; fi
+}
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+# ---- 一个假的 claude：不联网，只把自己收到的环境倒进文件 ----
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/claude" <<'FAKE'
+#!/usr/bin/env bash
+cat > /dev/null            # 提示词从 stdin 进来，丢掉
+{
+  echo "BASE_URL=${ANTHROPIC_BASE_URL:-}"
+  echo "MODEL=${ANTHROPIC_MODEL:-}"
+  echo "TOKEN=${ANTHROPIC_AUTH_TOKEN:-}"
+  echo "APIKEY=${ANTHROPIC_API_KEY:-}"
+  echo "PROVIDER=${LOOP_PROVIDER:-}"
+  echo "ARGS=$*"
+} >> "$FAKE_CLAUDE_DUMP"
+# 装成 --output-format json 的正常返回
+echo '{"result":"假的回答","total_cost_usd":0.01,"duration_ms":1000}'
+FAKE
+chmod +x "$TMP/bin/claude"
+
+# ---- 一个干净的沙盘，别碰用户真实的 .loop ----
+export ROOT="$TMP/sandbox"
+mkdir -p "$ROOT/docs"
+cp -r "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/roles-模板" "$ROOT/" 2>/dev/null || true
+# shellcheck disable=SC1091
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+
+export CLAUDE_BIN="$TMP/bin/claude"
+export FAKE_CLAUDE_DUMP="$TMP/dump.txt"
+
+mkdir -p "$ROLE_DIR"
+printf '层：执行\n一句话：管客服的\n\n你是客服。\n'   > "$(role_file 客服)"
+printf '层：参谋\n一句话：管战略的\n\n你是战略。\n'   > "$(role_file 战略)"
+printf '层：执行\n一句话：管内容的\n模型：sonnet\n\n你是内容。\n' > "$(role_file 内容)"
+
+echo
+echo "=== 接口隔离自测 ==="
+
+# ---------- 1. 默认全走官方 ----------
+check "没配接口时，认定是官方" "官方" "$(role_provider 客服)"
+
+# ---------- 2. 切一个人，只有他变 ----------
+provider_save_key deepseek "sk-假钥匙-测试用"
+provider_apply 客服 deepseek
+check "切过的人认得出是 deepseek" "deepseek" "$(role_provider 客服)"
+check "没切的人还是官方"          "官方"     "$(role_provider 战略)"
+
+# ---------- 3. 真调用一次，看 claude 到底收到什么 ----------
+: > "$FAKE_CLAUDE_DUMP"
+NO_GROUP_CHAT=1 ROLE_ISOLATED=1 ask_role 客服 "随便问一句" >/dev/null 2>&1
+got_url="$(grep -m1 '^BASE_URL=' "$FAKE_CLAUDE_DUMP" | cut -d= -f2-)"
+got_mdl="$(grep -m1 '^MODEL='    "$FAKE_CLAUDE_DUMP" | cut -d= -f2-)"
+got_tok="$(grep -m1 '^TOKEN='    "$FAKE_CLAUDE_DUMP" | cut -d= -f2-)"
+got_key="$(grep -m1 '^APIKEY='   "$FAKE_CLAUDE_DUMP" | cut -d= -f2-)"
+check "客服 真的连到 DeepSeek"     "https://api.deepseek.com/anthropic" "$got_url"
+check "客服 真的用 v4-pro"         "deepseek-v4-pro"                    "$got_mdl"
+check "客服 真的用那把新钥匙"       "sk-假钥匙-测试用"                    "$got_tok"
+check "官方 key 被清掉了（不打架）" ""                                   "$got_key"
+
+# ---------- 4. 同一秒问另一个人，他不该被污染 ----------
+: > "$FAKE_CLAUDE_DUMP"
+NO_GROUP_CHAT=1 ROLE_ISOLATED=1 ask_role 战略 "随便问一句" >/dev/null 2>&1
+got_url2="$(grep -m1 '^BASE_URL=' "$FAKE_CLAUDE_DUMP" | cut -d= -f2-)"
+got_tok2="$(grep -m1 '^TOKEN='    "$FAKE_CLAUDE_DUMP" | cut -d= -f2-)"
+# 注意这里不能断言"地址是空的"——机器上本来可能就设了官方地址，
+# 那是正常的、该继承的。要断言的是：他【没有】拿到 DeepSeek 那个地址。
+case "$got_url2" in
+  *deepseek*) fail "战略 被 DeepSeek 污染了（地址=$got_url2）" ;;
+  *) pass "战略 没被 DeepSeek 污染（地址=${got_url2:-默认})" ;;
+esac
+check "战略 没拿到别人的钥匙" "" "$got_tok2"
+
+# ---------- 5. 出事时要能说清为什么（LAST_LOG 必须活着穿过子 shell） ----------
+# 这条测的是一个真栽过的坑：接了别家接口的角色，claude_run 在子 shell 里跑，
+# 子 shell 里的赋值出不来，于是"没通"报得出来、"为什么没通"整段空白。
+[ -n "${LAST_LOG:-}" ] && [ -f "$LAST_LOG" ] \
+  && pass "换过接口的员工，出事时还能拿到日志（LAST_LOG 活着）" \
+  || fail "换过接口的员工的日志路径丢了——出事只会说'没通'，说不出为什么"
+
+# ---------- 6. 台账必须标出这笔走的谁家 ----------
+last_provider="$(tail -1 "$COST_LOG" 2>/dev/null | awk -F'\t' '{print $5}')"
+check "账单标了走的谁家接口" "官方" "$last_provider"
+
+# ---------- 7. 接口指定了模型，就不许再传角色定义里的「模型：」 ----------
+# 拿别家的接口点一道人家菜单上没有的菜，只会调不通。
+provider_apply 内容 deepseek
+: > "$FAKE_CLAUDE_DUMP"
+NO_GROUP_CHAT=1 ROLE_ISOLATED=1 ask_role 内容 "随便问一句" >/dev/null 2>&1
+if grep -q '^ARGS=.*--model sonnet' "$FAKE_CLAUDE_DUMP"; then
+  fail "接口已指定模型，却还把角色定义里的「模型：sonnet」传过去了"
+else
+  pass "接口指定了模型时，不再传角色定义里的「模型：」"
+fi
+
+# ---------- 8. 换回官方要换得干净 ----------
+provider_apply 客服 官方
+check "换回官方后认定为官方" "官方" "$(role_provider 客服)"
+[ -f "$(role_env 客服)" ] && fail "换回官方了，接口文件却还在" \
+  || pass "换回官方后，接口文件清干净了"
+
+echo
+if [ "$FAILED" = 0 ]; then echo "接口隔离自测：全部通过"; else echo "接口隔离自测：有失败项"; fi
+exit "$FAILED"
+
+
+▼▼▼ FILE: scripts/test-听懂.sh ▼▼▼
+#!/usr/bin/env bash
+# 第1步「听懂」的自测。不花钱、不联网。
+#
+# 这一步跟别的步不一样，它是【引导式】的：可能问你好几轮，你答完它再听一遍。
+# 所以最坏的失败方式不是报错，是两种"看起来对"：
+#   ① 它其实没听懂，却往下走了 → 后面八步全建立在一个误解上
+#   ② 它一直说没听懂，问个没完 → 你被困在第1步
+# 这里两头都测。
+#
+# 还有一件事必须守住：十步的清单被抄了三份（lib.sh / 状态.py / 看板.py）。
+# 抄的东西会漂。漂了的话界面上的进度、拍板闸门、文档名全是错的，
+# 而且【看不出来是错的】。第一节就是逐项对着比。
+
+set -uo pipefail
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+FAILED=0
+pass() { printf '  [通过] %s\n' "$1"; }
+fail() { printf '  [失败] %s\n' "$1"; FAILED=1; }
+check() {
+  if [ "$2" = "$3" ]; then pass "$1"
+  else fail "$1"; printf '         期望：%s\n         实际：%s\n' "$2" "$3"; fi
+}
+
+echo
+echo "=== 第1步「听懂」自测 ==="
+
+# ---------- 一、三份拷贝不许漂 ----------
+drift="$(python3 - "$REPO" <<'PY'
+import subprocess, sys, os
+repo = sys.argv[1]
+sys.path.insert(0, os.path.join(repo, "scripts"))
+import 状态 as ST
+
+def bash(snippet):
+    r = subprocess.run(["bash", "-c", '. "$1/scripts/lib.sh"; ' + snippet, "_", repo],
+                       capture_output=True, text=True, cwd=repo)
+    return r.stdout.strip()
+
+bad = []
+
+# STAGES 顺序
+want = bash('printf "%s\\n" "${STAGES[@]}"').split()
+got  = [k for k, _ in ST.STAGES]
+if want != got:
+    bad.append("STAGES 不一致\n  lib.sh: %s\n  状态.py: %s" % (want, got))
+
+# 哪些步要人拍板
+for k in want:
+    b = bash('stage_needs_signoff "%s" && echo yes || echo no' % k) == "yes"
+    p = k in ST.SIGNOFF
+    if b != p:
+        bad.append("要不要拍板对不上：%s（lib.sh=%s 状态.py=%s）" % (k, b, p))
+
+# 每步产出哪份文档
+for k in want:
+    b = os.path.basename(bash('stage_doc "%s"' % k))
+    p = ST.STAGE_DOC.get(k, "")
+    if b != p:
+        bad.append("产出文档对不上：%s（lib.sh=%r 状态.py=%r）" % (k, b, p))
+
+# 看板不许再自己抄一份
+import pathlib
+kb = pathlib.Path(repo, "scripts", "看板.py").read_text(encoding="utf-8")
+if "STAGES = [" in kb:
+    bad.append("看板.py 又自己抄了一份 STAGES —— 必须 from 状态 import")
+
+print("\n".join(bad))
+PY
+)"
+if [ -z "$drift" ]; then
+  pass "十步清单三处一致（lib.sh / 状态.py / 看板.py）"
+else
+  fail "十步清单漂了"; printf '%s\n' "$drift" | sed 's/^/         /'
+fi
+
+# 每份说明书开头写的「第N步」，得跟它在流程里的真实位置一样。
+#
+# 为什么单测这条：references/框架库.md 里「第4步『要做什么』」这个错，
+# 挂了很久没人发现——因为没有任何人、任何东西会去核对编号。
+# 插一个新步骤就会让所有编号错位一格，而且错了完全看不出来。
+badnum=""
+for st in $(bash -c '. "$1/scripts/lib.sh"; printf "%s\n" "${STAGES[@]}"' _ "$REPO"); do
+  [ "$st" = "done" ] && continue
+  f="$REPO/.claude/commands/$st.md"
+  [ -f "$f" ] || { badnum="$badnum
+  $st 没有说明书文件"; continue; }
+  want="$(bash -c '. "$1/scripts/lib.sh"; stage_num "$2"' _ "$REPO" "$st")"
+  got="$(grep -m1 -oE '^description: 第[0-9]+步' "$f" | grep -oE '[0-9]+' || true)"
+  [ "$want" = "$got" ] || badnum="$badnum
+  $st.md 写着第${got:-?}步，实际是第${want}步"
+done
+if [ -z "$badnum" ]; then
+  pass "十份说明书开头的「第N步」都对得上真实位置"
+else
+  fail "说明书的步骤编号对不上"; printf '%s\n' "$badnum"
+fi
+
+# ---------- 搭个沙盘，用假的 claude ----------
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+SANDBOX="$TMP/sandbox"
+mkdir -p "$SANDBOX"
+cp "$REPO/loop.sh" "$SANDBOX/"
+cp -r "$REPO/scripts" "$REPO/.claude" "$SANDBOX/"
+rm -rf "$SANDBOX/scripts/__pycache__"
+chmod +x "$SANDBOX/loop.sh"
+
+# 假 claude：把「这一轮该写什么」从环境变量里拿，写进 docs/00-听到的.md
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/claude" <<'FAKE'
+#!/usr/bin/env bash
+cat > /dev/null
+if [ -n "${FAKE_WRITE:-}" ]; then
+  mkdir -p "$(dirname "$FAKE_WRITE")"
+  printf '%s\n' "${FAKE_BODY:-}" > "$FAKE_WRITE"
+fi
+echo '{"result":"假的回答","total_cost_usd":0.01,"duration_ms":900}'
+FAKE
+chmod +x "$TMP/bin/claude"
+export CLAUDE_BIN="$TMP/bin/claude"
+export FAKE_WRITE="$SANDBOX/docs/00-听到的.md"
+
+listen_doc() { cat "$SANDBOX/docs/00-听到的.md" 2>/dev/null; }
+stage_now()  { cat "$SANDBOX/.loop/stage" 2>/dev/null; }
+
+# ---------- 二、start 之后应该停在第1步 ----------
+export FAKE_BODY='# 00 · 我听到的
+
+原话：「我想做个帮我记客户跟进的小工具」
+
+轮次：第 1 轮   状态：还没听懂
+
+## 四、我不许替你猜的
+
+### 问题 1：你现在有多少个客户要跟
+- **A** 50 个以内，一个人管得过来
+- **B** 几百个，得靠工具
+- **我推荐 A**，因为你说的是"小工具"
+
+## 五、我可能听错的地方
+1. 也许你要的不是记录，是提醒'
+( cd "$SANDBOX" && ./loop.sh start "我想做个帮我记客户跟进的小工具" >/dev/null 2>&1 )
+check "start 之后停在第1步「听懂」" "听懂" "$(stage_now)"
+[ -f "$SANDBOX/docs/00-听到的.md" ] \
+  && pass "产出了 docs/00-听到的.md" || fail "没产出 docs/00-听到的.md"
+
+# ---------- 三、还没听懂就不许往下走 ----------
+( cd "$SANDBOX" && ./loop.sh go >/dev/null 2>&1 )
+check "「还没听懂」时，go 不会溜到第2步" "听懂" "$(stage_now)"
+
+out="$( cd "$SANDBOX" && ./loop.sh go 2>&1 )"
+printf '%s' "$out" | grep -q "问题 1" \
+  && pass "它把问题直接打在屏幕上（不用你翻文件）" \
+  || fail "问题没打出来，人得自己去翻文件找"
+
+# ---------- 三之二、一次只问一个 ----------
+#
+# 产品定义：用户的全部工作量 = 回答一个问题，或者做一个选择题。
+# 一次甩三个给他，那不是"回答一个问题"，那是一张表格——
+# 表格会让人觉得"我得先都想清楚再答"，于是他就不答了。
+S3="$TMP/sandbox3"
+cp -r "$SANDBOX" "$S3"; rm -rf "$S3/.loop" "$S3/docs"
+export FAKE_WRITE="$S3/docs/00-听到的.md"
+export FAKE_BODY='原话：「随便说点什么」
+
+轮次：第 1 轮   状态：还没听懂
+
+## 四、我不许替你猜的
+
+### 问题 1：第一个问题问的是甲
+- **A** 甲选项A
+- **B** 甲选项B
+
+### 问题 2：第二个问题问的是乙
+- **A** 乙选项A
+
+### 问题 3：第三个问题问的是丙
+- **A** 丙选项A
+
+## 五、我可能听错的地方
+1. 也许'
+( cd "$S3" && ./loop.sh start "随便说点什么" >/dev/null 2>&1 )
+out="$( cd "$S3" && ./loop.sh go 2>&1 )"
+
+if printf '%s' "$out" | grep -q "问的是甲" \
+   && ! printf '%s' "$out" | grep -q "问的是乙" \
+   && ! printf '%s' "$out" | grep -q "问的是丙"; then
+  pass "一次只显示一个问题（不是甩一张表格给他）"
+else
+  fail "一次把好几个问题都甩出来了"
+fi
+printf '%s' "$out" | grep -q "第 1 个，共 3 个" \
+  && pass "告诉他一共几个、现在第几个（心里有底）" || fail "没说清一共几个"
+
+# 答第一个：应该【本地】给出第二个，不许再花钱跑 AI
+export FAKE_WRITE=""            # 这一步要是调了 AI，文档就会被改；不改说明没调
+calls_before=$(ls "$S3/.loop/log" 2>/dev/null | wc -l)
+out2="$( cd "$S3" && ./loop.sh 答 "A" 2>&1 )"
+calls_after=$(ls "$S3/.loop/log" 2>/dev/null | wc -l)
+
+printf '%s' "$out2" | grep -q "问的是乙" \
+  && pass "答完第一个，本地直接给出第二个" || fail "答完第一个没接上第二个"
+[ "$calls_after" -eq "$calls_before" ] \
+  && pass "问第二个【没有再花钱跑 AI】（同一轮的问题在本地走完）" \
+  || fail "每答一个就重跑一次 AI —— 三个问题要花三次钱"
+
+# 答到最后一个，才该回去让它重新听
+out3="$( cd "$S3" && ./loop.sh 答 "A" 2>&1 )"
+printf '%s' "$out3" | grep -q "问的是丙" \
+  && pass "接着给第三个" || fail "第三个没给出来"
+out4="$( cd "$S3" && ./loop.sh 答 "A" 2>&1 )"
+printf '%s' "$out4" | grep -q "都答完了" \
+  && pass "全答完了才回去让它重新听一遍" || fail "答完最后一个没有触发重听"
+
+# 三个回答都要各自记在对应的题号下
+doc3="$(cat "$S3/docs/00-听到的.md")"
+[ "$(printf '%s' "$doc3" | grep -c '## 你的回答 · 第 1 轮 · 问题')" -eq 3 ] \
+  && pass "三个回答分别记在各自的题号下（回头看得出答的是哪题）" \
+  || fail "回答没有按题号分开记"
+
+export FAKE_WRITE="$SANDBOX/docs/00-听到的.md"
+
+# ---------- 四、答一句，轮次要往前走 ----------
+( cd "$SANDBOX" && FAKE_WRITE="" ./loop.sh 答 "1A，其实我最烦的是老忘了谁该回访" >/dev/null 2>&1 )
+listen_doc | grep -q "老忘了谁该回访" \
+  && pass "回答被记进了文档" || fail "回答没进文档"
+listen_doc | grep -q "## 你的回答" \
+  && pass "回答单独成节，看得出是你说的" || fail "回答没有单独成节"
+
+# ---------- 五、说听懂了，才准进第1步 ----------
+export FAKE_BODY='# 00 · 我听到的
+
+原话：「我想做个帮我记客户跟进的小工具」
+
+轮次：第 2 轮   状态：听懂了
+
+## 三、我推断你真正要的
+真实痛点：老忘了谁该回访 [推断，依据：你原话里的"记客户跟进"]'
+# 注意：这里必须用「答」而不是「go」。
+# 还没听懂的时候 go 只重显问题、不重跑（重跑要花钱，而你没给新信息）。
+# 要往前推进只有一条路：答一句。这条本身就是在验证那个设计。
+( cd "$SANDBOX" && ./loop.sh 答 "B，几百个" >/dev/null 2>&1 )
+listen_doc | grep -q "状态：听懂了" || fail "这一轮该写成「听懂了」，没写成"
+check "「听懂了」之后停在拍板闸门，还没往下" "听懂" "$(stage_now)"
+
+export FAKE_WRITE=""                                  # 别再改文档
+( cd "$SANDBOX" && ./loop.sh go >/dev/null 2>&1 )     # 这一次 go = 你点头
+check "你点头之后才进第2步" "goal" "$(stage_now)"
+
+# ---------- 六、轮数到顶要停，不许问个没完 ----------
+S2="$TMP/sandbox2"
+cp -r "$SANDBOX" "$S2"; rm -rf "$S2/.loop" "$S2/docs"
+export FAKE_WRITE="$S2/docs/00-听到的.md"
+export FAKE_BODY='原话：「随便说点什么」
+
+轮次：第 3 轮   状态：还没听懂'
+( cd "$S2" && LISTEN_MAX_ROUNDS=3 ./loop.sh start "随便说点什么" >/dev/null 2>&1 )
+out="$( cd "$S2" && LISTEN_MAX_ROUNDS=3 ./loop.sh go 2>&1 )"
+printf '%s' "$out" | grep -q "还是没聊拢" \
+  && pass "问到上限会说实话，不无限问下去" \
+  || fail "到了轮数上限还在若无其事地接着问"
+
+echo
+if [ "$FAILED" = 0 ]; then echo "第1步自测：全部通过"; else echo "第1步自测：有失败项"; fi
+exit "$FAILED"
+
+
+▼▼▼ FILE: scripts/test-论证.sh ▼▼▼
+#!/usr/bin/env bash
+# 论证（十个专家把「这事到底成不成」查一遍）的自测。不花钱、不联网。
+#
+# 这条命令最坏的失败方式还是那三种"看起来对"：
+#   ① 专家跑了但没交东西，却被记成成功 → 汇总里是十份空气
+#   ② 后跑的六个人【看不见】先跑的四个人查回来的数据
+#      → 那就退化成"十个人各说各的"，这条命令的全部设计就白费了
+#   ③ 预算中途用完，重跑时从头再来一遍，把已经交过的又跑一次（白烧钱）
+# 这里三条都测。
+
+set -uo pipefail
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+FAILED=0
+pass() { printf '  [通过] %s\n' "$1"; }
+fail() { printf '  [失败] %s\n' "$1"; FAILED=1; }
+
+echo
+echo "=== 论证自测 ==="
+
+# ---------- 零、角色到底收没收到自己的身份和问题 ----------
+# 这条单独排在最前面，因为它栽过：
+# strip_frontmatter 对「没有 frontmatter 的文件」只输出了第一行，
+# 于是每个角色收到的只有「层：参谋」这一行——身份没收到，问题也没收到。
+# 它照样会输出东西（后面附着文档就能编出个样子），从外面完全看不出来。
+sfp="$(mktemp)"
+printf '层：参谋\n一句话：管钱的\n\n你是财务专家。\n\n---- 现在问你这件事 ----\n算这笔账\n' > "$sfp"
+got="$(bash -c '. "$1/scripts/lib.sh"; strip_frontmatter "$2"' _ "$REPO" "$sfp")"
+if printf '%s' "$got" | grep -q "算这笔账" && printf '%s' "$got" | grep -q "你是财务专家"; then
+  pass "没有 frontmatter 的提示词，角色定义和问题都完整送到了"
+else
+  fail "角色收不到自己的身份/问题（strip_frontmatter 把内容吃掉了）"
+  printf '         它实际收到的是：\n'; printf '%s\n' "$got" | sed 's/^/           /'
+fi
+sfp2="$(mktemp)"
+printf -- '---\ndescription: x\n---\n\n正文\n' > "$sfp2"
+got2="$(bash -c '. "$1/scripts/lib.sh"; strip_frontmatter "$2"' _ "$REPO" "$sfp2")"
+printf '%s' "$got2" | grep -q "description" \
+  && fail "有 frontmatter 的没被去掉（--- 开头会被当成命令行选项）" \
+  || pass "有 frontmatter 的照样去得干净"
+rm -f "$sfp" "$sfp2"
+
+# 想留着沙盘自己翻：KEEP_TMP=1 bash scripts/test-论证.sh
+TMP="$(mktemp -d)"
+if [ "${KEEP_TMP:-0}" = 1 ]; then echo "沙盘留在：$TMP"; else trap 'rm -rf "$TMP"' EXIT; fi
+SB="$TMP/sb"; mkdir -p "$SB"
+cp "$REPO/loop.sh" "$SB/"
+cp -r "$REPO/scripts" "$REPO/.claude" "$REPO/roles-模板" "$SB/"
+rm -rf "$SB/scripts/__pycache__"
+chmod +x "$SB/loop.sh"
+mkdir -p "$SB/docs"
+printf '# 目标\n每月净赚 2 万\n' > "$SB/docs/00-目标.md"
+printf '# 听到的\n真实痛点：老忘了回访\n' > "$SB/docs/00-听到的.md"
+
+# 假 claude：把收到的【完整提示词】存一份（用来验证上下文有没有真传过去），
+# 再按 FAKE_WRITE 写出产物。
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/claude" <<'FAKE'
+#!/usr/bin/env bash
+prompt="$(cat)"
+n=$(ls "$DUMP_DIR" 2>/dev/null | wc -l)
+printf '%s' "$prompt" > "$DUMP_DIR/$n.txt"
+if [ -n "${FAKE_WRITE:-}" ]; then
+  mkdir -p "$(dirname "$FAKE_WRITE")"
+  printf '%s\n' "${FAKE_BODY:-x}" > "$FAKE_WRITE"
+fi
+echo '{"result":"假的","total_cost_usd":0.01,"duration_ms":100}'
+FAKE
+chmod +x "$TMP/bin/claude"
+export CLAUDE_BIN="$TMP/bin/claude"
+export DUMP_DIR="$TMP/dump"; mkdir -p "$DUMP_DIR"
+
+cd "$SB"
+
+# ---------- 一、人不齐要拦住 ----------
+out="$(./loop.sh 论证 2>&1)"
+printf '%s' "$out" | grep -q "论证团还差人" \
+  && pass "人不齐时拦住了，并给出招人命令" || fail "人不齐居然还往下跑"
+
+./loop.sh hire 行研 增长 竞品 技术 财务 战略 产品 合规 运营 风控 >/dev/null 2>&1
+
+# ---------- 二、没设预算要拦住 ----------
+out="$(./loop.sh 论证 2>&1)"
+printf '%s' "$out" | grep -q "先设个上限" \
+  && pass "没设预算时拦住了（这是最贵的一步）" || fail "没设预算就敢跑十几次调用"
+
+./loop.sh budget 30 >/dev/null 2>&1
+
+# ---------- 三、跑一遍：每个人都要交东西 ----------
+# 让假 claude 每次都往「当前该写的那个文件」写。用一个包装脚本按调用顺序决定写哪儿。
+cat > "$TMP/bin/claude" <<'FAKE'
+#!/usr/bin/env bash
+prompt="$(cat)"
+n=$(ls "$DUMP_DIR" | wc -l)
+printf '%s' "$prompt" > "$DUMP_DIR/$n.txt"
+# 从提示词里认出这是谁的活：找 work/<名字>/论证.md
+target="$(printf '%s' "$prompt" | grep -oE 'work/[^/ ]+/论证\.md' | head -1)"
+if [ -n "$target" ]; then
+  mkdir -p "$(dirname "$SB_ROOT/$target")"
+  printf '## 结论\n%s 查到的数字是 42\n' "$(basename "$(dirname "$target")")" > "$SB_ROOT/$target"
+# 注意顺序：综合那一次的【上下文里】也带着 00-论证.md，里面有"作业单"三个字。
+# 先判"作业单"的话，综合会被当成出作业单，把文件覆盖掉。
+elif printf '%s' "$prompt" | grep -q "十个专家的意见都交上来了"; then
+  cat >> "$SB_ROOT/docs/00-论证.md" <<'EOD'
+
+## 给你的一页纸
+
+**一句话结论**：能做，但获客是死穴
+
+**可行性 80%**（已验证 8 条 / 承重条件共 10 条）　判定：动态型
+
+## 承重条件核对表
+| # | 条件 | 状态 |
+EOD
+elif printf '%s' "$prompt" | grep -q "把「这事到底成不成」拆成十个"; then
+  mkdir -p "$SB_ROOT/docs"
+  printf '# 00 · 论证\n论证状态：作业单已出\n\n## 二、作业单\n' > "$SB_ROOT/docs/00-论证.md"
+fi
+echo '{"result":"假的","total_cost_usd":0.01,"duration_ms":100}'
+FAKE
+chmod +x "$TMP/bin/claude"
+export SB_ROOT="$SB"
+
+out="$(./loop.sh 论证 2>&1)"
+
+allin=1
+for who in 行研 增长 竞品 技术 财务 战略 产品 合规 运营 风控; do
+  [ -f "$SB/work/$who/论证.md" ] || { allin=0; echo "         $who 没交"; }
+done
+[ "$allin" = 1 ] && pass "十个人都交了产物" || fail "有人没交产物"
+
+# ---------- 四、【最关键】后跑的人必须看得见先跑的人查到的数据 ----------
+# 找到「财务」那次调用的提示词，看里面有没有「行研」的产物内容
+judge_dump=""
+for f in "$DUMP_DIR"/*.txt; do
+  if grep -q "work/财务/论证.md" "$f" 2>/dev/null; then judge_dump="$f"; break; fi
+done
+if [ -z "$judge_dump" ]; then
+  fail "找不到财务那次调用的记录"
+else
+  if grep -q "行研 查到的数字是 42" "$judge_dump"; then
+    pass "后跑的人真的看得见先跑的人查回来的数据（这条是这条命令的命）"
+  else
+    fail "后跑的人看不见先跑的数据 —— 那就退化成十个人各说各的了"
+  fi
+fi
+
+# ---------- 五、一页纸要摘出来打在屏幕上 ----------
+printf '%s' "$out" | grep -q "一句话结论" \
+  && pass "一页纸摘出来打在屏幕上了（不用翻文件）" || fail "一页纸没打出来"
+printf '%s' "$out" | grep -q "承重条件核对表" \
+  && fail "把完整版也一起倒给用户了 —— 一页纸就该只有一页" \
+  || pass "只给了一页纸，完整版留在文件里"
+
+# ---------- 六、可重跑：已经交过的要跳过，不许白烧钱 ----------
+before=$(ls "$DUMP_DIR" | wc -l)
+out2="$(./loop.sh 论证 2>&1)"
+after=$(ls "$DUMP_DIR" | wc -l)
+printf '%s' "$out2" | grep -q "已经交过了，跳过" \
+  && pass "重跑时跳过已交的人（预算中途用完能接着跑）" || fail "重跑把已经交过的又跑了一遍"
+# 只该重跑「综合」那一次
+[ "$((after-before))" -le 2 ] \
+  && pass "重跑只补跑了没做的（多花 $((after-before)) 次调用）" \
+  || fail "重跑多花了 $((after-before)) 次调用，等于从头再来"
+
+# ---------- 七、没交东西不许记成成功 ----------
+rm -f "$SB/work/风控/论证.md"
+cat > "$TMP/bin/claude" <<'FAKE'
+#!/usr/bin/env bash
+cat > /dev/null
+echo '{"result":"我啥也没写","total_cost_usd":0.01,"duration_ms":100}'
+FAKE
+chmod +x "$TMP/bin/claude"
+out3="$(./loop.sh 论证 2>&1)"
+printf '%s' "$out3" | grep -q "风控 没交东西" \
+  && pass "跑完没产出，如实记成「没交东西」" || fail "没产出却报了成功"
+
+echo
+if [ "$FAILED" = 0 ]; then echo "论证自测：全部通过"; else echo "论证自测：有失败项"; fi
+exit "$FAILED"
+
+
+▼▼▼ FILE: scripts/test-蓝图.sh ▼▼▼
+#!/usr/bin/env bash
+# 产品蓝图收敛循环的自测。不花钱、不联网。
+#
+# 这个循环最坏的失败方式：
+#   ① 它自己说"定了"就往下走了 —— 拍板必须是你亲口说的，不是它替你说
+#   ② 你说"挺好的"被当成拍板 —— 那是客气，不是决定
+#   ③ 一次把好几个问题甩给你（用户只做一件事：回答一个问题）
+#   ④ 每答一个就重跑一次 AI（三个问题花三次钱）
+#   ⑤ 改了十几轮还在原地转，不说实话
+
+set -uo pipefail
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+FAILED=0
+pass() { printf '  [通过] %s\n' "$1"; }
+fail() { printf '  [失败] %s\n' "$1"; FAILED=1; }
+
+echo
+echo "=== 蓝图收敛循环自测 ==="
+
+TMP="$(mktemp -d)"
+if [ "${KEEP_TMP:-0}" = 1 ]; then echo "沙盘留在：$TMP"; else trap 'rm -rf "$TMP"' EXIT; fi
+SB="$TMP/sb"; mkdir -p "$SB/docs"
+cp "$REPO/loop.sh" "$SB/"
+cp -r "$REPO/scripts" "$REPO/.claude" "$REPO/roles-模板" "$SB/"
+rm -rf "$SB/scripts/__pycache__"
+chmod +x "$SB/loop.sh"
+printf '# 听到的\n真实痛点：老忘了回访\n' > "$SB/docs/00-听到的.md"
+
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/claude" <<'FAKE'
+#!/usr/bin/env bash
+p="$(cat)"
+n=$(ls "$DUMP_DIR" 2>/dev/null | wc -l)
+printf '%s' "$p" > "$DUMP_DIR/$n.txt"
+[ -n "${FAKE_WRITE:-}" ] && { mkdir -p "$(dirname "$FAKE_WRITE")"; printf '%s\n' "${FAKE_BODY:-}" > "$FAKE_WRITE"; }
+echo '{"result":"假的","total_cost_usd":0.01,"duration_ms":100}'
+FAKE
+chmod +x "$TMP/bin/claude"
+export CLAUDE_BIN="$TMP/bin/claude" DUMP_DIR="$TMP/dump"; mkdir -p "$DUMP_DIR"
+export FAKE_WRITE="$SB/docs/00-蓝图.md"
+export FAKE_BODY='# 00 · 蓝图
+
+轮次：第 1 轮   状态：还在改
+
+## 你要做的这个东西
+一个不让你把老客户搞丢的小本子
+
+## 我想确认一件事
+
+### 问题 1：甲问题
+- **A** 甲的A
+- **B** 甲的B
+
+### 问题 2：乙问题
+- **A** 乙的A
+
+## 详细版
+### 用户流程
+一二三'
+
+cd "$SB"
+out="$(./loop.sh 蓝图 2>&1)"
+
+# ---------- 一、还没定，不许往下走 ----------
+printf '%s' "$out" | grep -q "有一件事想跟你确认" \
+  && pass "画完停下来问你，没有自己往下跑" || fail "没停下来"
+
+# ---------- 二、一次只给一个 ----------
+if printf '%s' "$out" | grep -q "甲问题" && ! printf '%s' "$out" | grep -q "乙问题"; then
+  pass "一次只显示一个问题"
+else
+  fail "一次把两个问题都甩出来了"
+fi
+
+# ---------- 三、详细版不许倒给用户 ----------
+printf '%s' "$out" | grep -q "用户流程" \
+  && fail "把详细版也倒到屏幕上了 —— 默认只该给人性化那版" \
+  || pass "屏幕上只给人性化那版，详细版留在文件里"
+
+# ---------- 四、答第一个：本地接上第二个，不重跑 AI ----------
+before=$(ls "$DUMP_DIR" | wc -l)
+out2="$(./loop.sh 改 "A" 2>&1)"
+after=$(ls "$DUMP_DIR" | wc -l)
+printf '%s' "$out2" | grep -q "乙问题" \
+  && pass "答完第一个，本地接上第二个" || fail "没接上第二个"
+[ "$after" -eq "$before" ] \
+  && pass "问第二个没有再花钱跑 AI" || fail "每答一个就重跑一次 AI"
+
+# ---------- 五、全答完才重跑一轮 ----------
+export FAKE_BODY='# 00 · 蓝图
+
+轮次：第 2 轮   状态：还在改
+
+## 我想确认一件事
+
+### 问题 1：第二轮的问题
+- **A** 是
+
+## 详细版'
+out3="$(./loop.sh 改 "A" 2>&1)"
+[ "$(grep -cE '轮次(:|：)[[:space:]]*第[[:space:]]*2' docs/00-蓝图.md)" -ge 1 ] \
+  && pass "全答完了才重跑一轮（轮次前进）" || fail "没有重跑"
+
+# ---------- 六、【最要紧】它不许自己说定了 ----------
+grep -qE '状态(:|：)[[:space:]]*就是它了' docs/00-蓝图.md \
+  && fail "它自己写了「就是它了」——拍板必须是你亲口说的" \
+  || pass "它没替你拍板"
+
+# ---------- 七、你亲口说了，才锁 ----------
+out4="$(./loop.sh 定了 2>&1)"
+printf '%s' "$out4" | grep -q "定了" && grep -qE '状态(:|：)[[:space:]]*就是它了' docs/00-蓝图.md \
+  && pass "你说「定了」之后才锁定" || fail "锁定没生效"
+grep -q "对，这就是我要做的" docs/00-蓝图.md \
+  && pass "拍板这件事留了痕（回头查得到是谁定的）" || fail "拍板没留痕"
+
+# ---------- 八、锁了之后再跑，是「定了」不是接着问 ----------
+export FAKE_BODY='轮次：第 3 轮   状态：就是它了'
+out5="$(./loop.sh 蓝图 2>&1)"
+printf '%s' "$out5" | grep -q "接着往下" \
+  && pass "锁定之后提示往下走，不再纠缠" || fail "锁定后还在问"
+
+# ---------- 九、转太多轮要说实话 ----------
+SB2="$TMP/sb2"; cp -r "$SB" "$SB2"; rm -rf "$SB2/.loop"
+export FAKE_WRITE="$SB2/docs/00-蓝图.md"
+printf '轮次：第 12 轮   状态：还在改\n' > "$SB2/docs/00-蓝图.md"
+out6="$( cd "$SB2" && BP_MAX_ROUNDS=12 ./loop.sh 蓝图 2>&1 )"
+printf '%s' "$out6" | grep -q "还没定下来" \
+  && pass "转太多轮会说实话，不无限转下去" || fail "转了十几轮还在若无其事地接着问"
+
+# ---------- 十、知识库那个口子真的会被读进去 ----------
+SB3="$TMP/sb3"; cp -r "$SB" "$SB3"; rm -rf "$SB3/.loop" "$SB3/docs/00-蓝图.md"
+mkdir -p "$SB3/references/我的知识库"
+printf '我的审美：宁可少一个功能，也不要多一次点击\n' > "$SB3/references/我的知识库/审美.md"
+export FAKE_WRITE="" DUMP_DIR="$TMP/dump3"; mkdir -p "$DUMP_DIR"
+( cd "$SB3" && ./loop.sh 蓝图 >/dev/null 2>&1 )
+grep -rq "宁可少一个功能" "$DUMP_DIR" 2>/dev/null \
+  && pass "references/我的知识库/ 里的东西真的喂进去了" \
+  || fail "知识库那个口子是空的 —— 放了东西也没被读"
+
+echo
+if [ "$FAILED" = 0 ]; then echo "蓝图自测：全部通过"; else echo "蓝图自测：有失败项"; fi
+exit "$FAILED"
+
+
+▼▼▼ FILE: .gitignore ▼▼▼
+# 流水线的运行状态和日志：本地的东西，不进版本库
+.loop/
+.loop-backup-*/
+.loop-run.log
+
+# 密码、密钥这类东西，永远不要提交
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# 各语言的垃圾文件
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+dist/
+build/
+target/
+.DS_Store
+
+# 编辑器
+.vscode/
+.idea/
+
+# Claude Code 的本地个人设置（团队共享的是 settings.json）
+.claude/settings.local.json
+work/
+看板.html
+
+
