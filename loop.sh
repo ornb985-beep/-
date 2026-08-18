@@ -512,6 +512,108 @@ cmd_listen_once() {
   claude_run "$tmp"
 }
 
+# ---------- 试金石:两个脑子跑同一段话,分歧数出来,全票要报警 ----------
+#
+# 为什么有这条命令:2026-08-18 真机实证——只跑一个模型,一路绿灯;
+# 两个模型一对,才抓到一个没打标记的猜测在撑判级。
+# 而且那轮里两个模型唯一全票一致判轻的那句,恰好就是判错的那句。
+# 所以:分歧是信息,全票是警报。「全票通过应该触发警报,不是让人放心。」
+#
+# 三条硬规矩(2026-08-18 定死,不许扩):
+#   1. 每一跑【实际用了哪个模型】从调用日志验,不读配置——配置写的不等于真用的
+#   2. 分歧为 0 时显示明显警告,不许显示绿色的通过
+#   3. 调用前预算闸门硬查,不许跑一半才发现没钱
+cmd_touchstone() {
+  local text="${1:-}"
+  [ -n "$text" ] || die '用法:./loop.sh 试金石 "一段话"　(两个模型各拆一遍,分歧数出来)'
+  have_claude || die "这台机器上没装 claude,跑不了。"
+  command -v python3 >/dev/null 2>&1 || die "没有 python3,分歧数不了(要跑 scripts/对分歧.py)。"
+
+  # 预算闸门前置:这条命令要连打两次,没闸不让起跑,到顶不起跑
+  [ -n "$(budget_get)" ] || die "先设上限:./loop.sh budget <数>。两个模型各跑一次,没闸不让跑。"
+  budget_ok || return 1
+
+  local kf="$PROVIDER_DIR/deepseek.key"
+  [ -f "$kf" ] || die "没有 DeepSeek 的钥匙($kf)。先配一次接口把钥匙存进去。"
+
+  # 提示词和「听」同一份:听懂.md + 这段话,不写文件
+  local tmp="$STATE_DIR/听一次.md"
+  mkdir -p "$STATE_DIR"
+  {
+    cat "$CMD_DIR/听懂.md"
+    printf '\n\n---- 这次要听的话(不写文件,直接把结果说给我听)----\n'
+    printf '%s\n' "$text"
+    printf '\n注意:这次【不要】写任何文件,直接把上面那个结构打出来给我看。\n'
+  } > "$tmp"
+
+  local dir="$STATE_DIR/试金石"; mkdir -p "$dir"
+  local ts; ts="$(date +%Y%m%d-%H%M%S)"
+  local url; url="$(provider_field deepseek 3)"
+
+  local leg model out rc logf actual
+  for leg in pro flash; do
+    case "$leg" in
+      pro)   model="$(provider_field deepseek 4)" ;;
+      flash) model="$(provider_field deepseek-flash 4)" ;;
+    esac
+    title "试金石 · $model"
+    rule
+    rc=0
+    (
+      # 子 shell:钥匙和模型只在这一跑里生效,不污染外面
+      # shellcheck disable=SC1090
+      . "$kf"
+      export ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL="$url" \
+             ANTHROPIC_MODEL="$model" \
+             ANTHROPIC_DEFAULT_OPUS_MODEL="$model" \
+             ANTHROPIC_DEFAULT_SONNET_MODEL="$model" \
+             ANTHROPIC_DEFAULT_HAIKU_MODEL="$model"
+      LOG_SUBDIR="试金石" claude_run "$tmp"
+    ) || rc=$?
+    [ "$rc" -eq 4 ] && { warn "到预算上限,停在「$model」这一跑之前。已跑完的日志还在 $dir/"; return 1; }
+    [ "$rc" -ne 0 ] && { warn "「$model」这一跑没跑成(退出码 $rc),看日志:$(state_get last_log)"; return 1; }
+
+    # 第 6 条:配置里写的不等于真的用了——从调用日志里验实际模型
+    logf="$(state_get last_log)"
+    actual="$(python3 -c "
+import json,sys
+try:
+    d=json.load(open(sys.argv[1]))
+    ks=list((d.get('modelUsage') or {}).keys())
+    print(ks[0] if ks else '')
+except Exception:
+    print('')
+" "$logf.json")"
+    if [ "$actual" != "$model" ]; then
+      die "模型验证失败(第 6 条):要的是「$model」,调用日志里实际是「${actual:-读不到}」。这一轮作废,别拿它的产出当数。"
+    fi
+    ok "验明正身:这一跑真用的是 $actual(来自调用日志,不是配置)"
+    cp "$logf" "$dir/$ts-$leg.log"
+  done
+
+  # 分歧交给对分歧.py 数,它的三个检查逻辑这儿一个不碰
+  title "试金石 · 数分歧"
+  rule
+  out="$(python3 "$ROOT/scripts/对分歧.py" "$dir/$ts-pro.log" "$dir/$ts-flash.log")" || true
+  printf '%s\n' "$out"
+
+  # 全票 = 警报,不是通过。判据:判级不同 0 对,且两边都没有独有句
+  if printf '%s' "$out" | grep -q "不同 0 对" \
+     && printf '%s' "$out" | grep -q "前一份独有 0 句,后一份独有 0 句"; then
+    rule
+    warn "⚠ 全票一致——这是警报,不是让人放心。"
+    say  "  「全票通过应该触发警报,不是让人放心。」(工程交接包·核心一)"
+    say  "  两个脑子毫无分歧,通常说明它们在顺着同一个先验说话。"
+    say  "  实证:2026-08-18 那轮,两模型唯一全票一致判轻的那句,恰好就是判错的那句。"
+    say  "  建议:换一个不同家的模型再跑一遍,或人工复核判级表。"
+    rule
+    return 1
+  fi
+  say ""
+  say "分歧就是信息:吵起来的地方是模型差异,别动规则;两边一起错的地方才轮到规则(验证的规矩第 7 条)。"
+  say "两份原始产出:$dir/$ts-pro.log 和 $dir/$ts-flash.log"
+}
+
 cmd_status() {
   local stage; stage="$(state_get stage goal)"
   title "现在的进度"
@@ -2392,6 +2494,7 @@ cmd_help() {
   ./loop.sh start "你想做什么"   开始（一句话说清就行，不用想得多完整）
   ./loop.sh 答 "1A 2C ..."       回答第1步问你的那几个问题
   ./loop.sh 听 "任何一段话"       单独用：只把一段话拆开听懂，不开项目
+  ./loop.sh 试金石 "任何一段话"    两个模型各拆一遍，分歧数出来；全票一致会报警
   ./loop.sh go                   继续往下跑
   ./loop.sh status               看进度（终端）
   ./loop.sh 看板                 生成桌面看板：组织图＋群聊＋台账＋账单，双击就开
@@ -2468,6 +2571,7 @@ main() {
     start)   cmd_start "${1:-}" ;;
     answer|答|回答) cmd_answer "${1:-}" ;;
     listen|听) cmd_listen_once "${1:-}" ;;
+    touchstone|试金石) cmd_touchstone "${1:-}" ;;
     go|next|continue) cmd_go ;;
     status|st) cmd_status ;;
     ceo|操盘) cmd_ceo ;;

@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# 试金石命令的自测。不花钱、不联网(用假 claude)。
+#
+# 守四件事:
+#   1. 没设预算不让起跑(闸门前置,不许跑一半没钱)
+#   2. 两个模型各跑一次,分歧数出来(数字,不是"大致相同")
+#   3. 调用日志里的模型和要的对不上,必须当场死——配置写的不等于真用的(第 6 条)
+#   4. 分歧为 0 时必须报警,不许绿色通过——「全票通过应该触发警报,不是让人放心」
+#
+# 想亲眼看它会红:BREAK=1 bash scripts/test-试金石.sh
+#   会把沙盒里【loop.sh 本体】的模型验证掐掉(if 条件改成 false),
+#   于是说谎的模型溜过去,第 3 件事的断言必须红。注入点在被测代码上。
+
+set -uo pipefail
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+FAILED=0
+pass() { printf '  [通过] %s\n' "$1"; }
+fail() { printf '  [失败] %s\n' "$1"; FAILED=1; }
+
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+
+# ---- 沙盒:整套拷进去,不碰真仓库的 .loop ----
+SB="$TMP/sandbox"
+mkdir -p "$SB/.claude/commands" "$SB/.loop/接口"
+cp "$REPO/loop.sh" "$SB/"
+cp -r "$REPO/scripts" "$SB/"
+rm -rf "$SB/scripts/__pycache__"
+cp "$REPO/.claude/commands/听懂.md" "$SB/.claude/commands/"
+chmod +x "$SB/loop.sh"
+printf 'ANTHROPIC_AUTH_TOKEN=fake-key-for-test\nunset ANTHROPIC_API_KEY\n' > "$SB/.loop/接口/deepseek.key"
+
+if [ -n "${BREAK:-}" ]; then
+  sed -i 's/if \[ "\$actual" != "\$model" \]; then/if false; then/' "$SB/loop.sh"
+fi
+
+# ---- 假 claude:不联网,按收到的环境变量报模型;能被指使说谎/输出全一致 ----
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/claude" <<'FAKE'
+#!/usr/bin/env bash
+cat > /dev/null
+rep="${ANTHROPIC_MODEL:-?}"
+[ -n "${FAKE_LIE:-}" ] && rep="deepseek-v4-pro"
+variant="${ANTHROPIC_MODEL:-?}"
+[ -n "${FAKE_SAME:-}" ] && variant="deepseek-v4-pro"
+python3 - "$rep" "$variant" <<'PY'
+import json, sys
+rep, variant = sys.argv[1], sys.argv[2]
+star1 = "★★" if variant == "deepseek-v4-pro" else "★"
+result = f"""# 00 · 我听到的
+
+原话：「我要一个记账的东西，老是忘了记。」
+
+| # | 你原话里的哪句 | 这是什么 | 轻重 | 为什么这么判 |
+|---|---|---|---|---|
+| 1 | 「我要一个记账的东西」 | 方案 | {star1} | 方案不是问题 |
+| 2 | 「老是忘了记」 | 痛点 | ★★★ | 频次词 |
+
+一点推断 `[推断]`
+"""
+print(json.dumps({"result": result, "total_cost_usd": 0.01, "duration_ms": 5,
+                  "modelUsage": {rep: {"inputTokens": 1, "outputTokens": 1}}}))
+PY
+FAKE
+chmod +x "$TMP/bin/claude"
+
+run() { ( cd "$SB" && CLAUDE_BIN="$TMP/bin/claude" ./loop.sh "$@" ); }
+
+echo
+echo "=== 试金石自测 ==="
+
+# ---------- 一、没设预算不让起跑 ----------
+out="$(run 试金石 "随便一句" 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "budget" \
+  && pass "没设预算:拦住了,并指路 budget" \
+  || fail "没设预算:该拦住并提示设上限(rc=$rc)"
+
+echo 5 > "$SB/.loop/budget"
+
+# ---------- 二、正常跑:两腿都验明正身,分歧是数字 ----------
+out="$(run 试金石 "随便一句" 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] && pass "两腿都跑完:退出码 0" || fail "两腿该跑完(rc=$rc)"
+printf '%s' "$out" | grep -q "真用的是 deepseek-v4-pro" \
+  && pass "pro 腿验明正身(从调用日志)" || fail "没验出 pro 腿的真实模型"
+printf '%s' "$out" | grep -q "真用的是 deepseek-v4-flash" \
+  && pass "flash 腿验明正身(从调用日志)" || fail "没验出 flash 腿的真实模型"
+printf '%s' "$out" | grep -q "相同 1 对,不同 1 对" \
+  && pass "分歧是数字:相同 1 / 不同 1" || fail "分歧没数出来(该是 相同 1 对,不同 1 对)"
+printf '%s' "$out" | grep -q "全票一致——这是警报" \
+  && fail "有分歧还报了全票警报" || pass "有分歧时没有误报警报"
+
+# ---------- 三、模型说谎必须当场死(第 6 条) ----------
+out="$(FAKE_LIE=1 run 试金石 "随便一句" 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "模型验证失败" \
+  && pass "说谎的模型被当场抓住,命令非零退出" \
+  || fail "模型说谎没被抓住——配置写的不等于真用的(rc=$rc)"
+
+# ---------- 四、全票一致必须报警,不许绿色通过 ----------
+out="$(FAKE_SAME=1 run 试金石 "随便一句" 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && pass "全票时退出码非 0(不算通过)" || fail "全票时退出码该非 0(rc=$rc)"
+printf '%s' "$out" | grep -q "全票一致——这是警报" \
+  && pass "全票时打出了警报" || fail "全票时没报警"
+printf '%s' "$out" | grep -q "全票通过应该触发警报" \
+  && pass "警报里带着交接包那句原话" || fail "警报里少了交接包那句原话"
+
+echo
+if [ "$FAILED" = 0 ]; then echo "试金石自测:全部通过"; else echo "试金石自测:有失败项"; fi
+exit "$FAILED"

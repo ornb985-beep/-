@@ -200,6 +200,12 @@ if [ -f scripts/test-对分歧.sh ]; then
   run "对分歧（漏判/判级差异/标记,数出来不许靠手感）" bash scripts/test-对分歧.sh
 fi
 
+# 试金石：两个模型跑同一段话、自动数分歧、全票报警、模型从日志验明正身。
+# 它是「换脑子是真的换了判断」这件事的自动化尺子。
+if [ -f scripts/test-试金石.sh ]; then
+  run "试金石（两脑对跑/分歧计数/全票报警/模型验身）" bash scripts/test-试金石.sh
+fi
+
 # ---------------- 已知失败区（撞到的真 bug，先记录、不修） ----------------
 if [ -d scripts/known-fail ]; then
   for kf in scripts/known-fail/test-*.sh; do
