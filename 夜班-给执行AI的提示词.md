@@ -4,8 +4,35 @@
 
 ---
 
-你接手的是一套叫 MoneyLoop 的系统。仓库分支：
-`claude/project-template-automation-ea9utn`
+# 第零步 · 先把代码弄到手（照抄这三行，别自己去 GitHub 找）
+
+```bash
+git clone https://github.com/ornb985-beep/-.git moneyloop
+cd moneyloop
+git checkout claude/project-template-automation-ea9utn
+```
+
+**三个坑，先说在前面：**
+
+1. **仓库名就是一个减号 `-`。** 搜是搜不到的，只能用上面那个地址。
+   克隆时**必须指定一个目录名**（上面写的 `moneyloop`）——
+   不然你会得到一个叫 `-` 的目录，而 `cd -` 在 shell 里是"回到上一个目录"，
+   你会以为自己进去了，其实没有。
+2. **有一堆同名的空壳仓库**（`-1` `-2` `-3` `-4` `-5`，还有一个真叫
+   `moneyloop` 的**是空的**）。**别自己找，会找错，而且找错了不报错。**
+3. **认门**：下面两条都对上了才算克隆对了，对不上就是拿错仓库了，
+   停下来告诉我，别接着做。
+
+```bash
+git log --oneline -1        # 应该看到一条中文提交信息
+ls references/夜班.md        # 这个文件必须存在
+bash scripts/check.sh       # 应该是绿的；红了先说一声再往下
+```
+
+**这套东西叫 MoneyLoop。工作分支：`claude/project-template-automation-ea9utn`
+——所有改动推到这个分支，不许推别的分支。**
+
+---
 
 **先读这四份，别读别的**：
 `references/夜班.md`（这次的设计全文，最重要）·
