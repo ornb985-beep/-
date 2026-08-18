@@ -116,7 +116,8 @@ def 数标记(text: str):
 
 
 def 重叠(a, b):
-    起 = max(a[0], b[0]); 止 = min(a[1], b[1])
+    起 = max(a[0], b[0])
+    止 = min(a[1], b[1])
     交 = max(0, 止 - 起)
     短 = min(a[1] - a[0], b[1] - b[0])
     return 交 / 短 if 短 else 0
@@ -161,7 +162,7 @@ def main():
         相同 = [x for x in 对上 if x[3] is not None and x[1] == x[3]]
         不同 = [x for x in 对上 if x[3] is not None and x[1] != x[3]]
         只A有 = [x for x in 对上 if x[3] is None]
-        print(f'\n【二 · 判级差异】(锚回原话对齐,跨度重叠 ≥30% 算同一句)')
+        print('\n【二 · 判级差异】(锚回原话对齐,跨度重叠 ≥30% 算同一句)')
         print(f'配上 {len(相同) + len(不同)} 对:相同 {len(相同)} 对,不同 {len(不同)} 对')
         for a原, a星, b原, b星 in 相同:
             print(f'  = 「{a原}」{"★" * a星}  ↔  「{b原}」{"★" * b星}')

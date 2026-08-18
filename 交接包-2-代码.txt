@@ -518,6 +518,108 @@ cmd_listen_once() {
   claude_run "$tmp"
 }
 
+# ---------- 试金石:两个脑子跑同一段话,分歧数出来,全票要报警 ----------
+#
+# 为什么有这条命令:2026-08-18 真机实证——只跑一个模型,一路绿灯;
+# 两个模型一对,才抓到一个没打标记的猜测在撑判级。
+# 而且那轮里两个模型唯一全票一致判轻的那句,恰好就是判错的那句。
+# 所以:分歧是信息,全票是警报。「全票通过应该触发警报,不是让人放心。」
+#
+# 三条硬规矩(2026-08-18 定死,不许扩):
+#   1. 每一跑【实际用了哪个模型】从调用日志验,不读配置——配置写的不等于真用的
+#   2. 分歧为 0 时显示明显警告,不许显示绿色的通过
+#   3. 调用前预算闸门硬查,不许跑一半才发现没钱
+cmd_touchstone() {
+  local text="${1:-}"
+  [ -n "$text" ] || die '用法:./loop.sh 试金石 "一段话"　(两个模型各拆一遍,分歧数出来)'
+  have_claude || die "这台机器上没装 claude,跑不了。"
+  command -v python3 >/dev/null 2>&1 || die "没有 python3,分歧数不了(要跑 scripts/对分歧.py)。"
+
+  # 预算闸门前置:这条命令要连打两次,没闸不让起跑,到顶不起跑
+  [ -n "$(budget_get)" ] || die "先设上限:./loop.sh budget <数>。两个模型各跑一次,没闸不让跑。"
+  budget_ok || return 1
+
+  local kf="$PROVIDER_DIR/deepseek.key"
+  [ -f "$kf" ] || die "没有 DeepSeek 的钥匙($kf)。先配一次接口把钥匙存进去。"
+
+  # 提示词和「听」同一份:听懂.md + 这段话,不写文件
+  local tmp="$STATE_DIR/听一次.md"
+  mkdir -p "$STATE_DIR"
+  {
+    cat "$CMD_DIR/听懂.md"
+    printf '\n\n---- 这次要听的话(不写文件,直接把结果说给我听)----\n'
+    printf '%s\n' "$text"
+    printf '\n注意:这次【不要】写任何文件,直接把上面那个结构打出来给我看。\n'
+  } > "$tmp"
+
+  local dir="$STATE_DIR/试金石"; mkdir -p "$dir"
+  local ts; ts="$(date +%Y%m%d-%H%M%S)"
+  local url; url="$(provider_field deepseek 3)"
+
+  local leg model out rc logf actual
+  for leg in pro flash; do
+    case "$leg" in
+      pro)   model="$(provider_field deepseek 4)" ;;
+      flash) model="$(provider_field deepseek-flash 4)" ;;
+    esac
+    title "试金石 · $model"
+    rule
+    rc=0
+    (
+      # 子 shell:钥匙和模型只在这一跑里生效,不污染外面
+      # shellcheck disable=SC1090
+      . "$kf"
+      export ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL="$url" \
+             ANTHROPIC_MODEL="$model" \
+             ANTHROPIC_DEFAULT_OPUS_MODEL="$model" \
+             ANTHROPIC_DEFAULT_SONNET_MODEL="$model" \
+             ANTHROPIC_DEFAULT_HAIKU_MODEL="$model"
+      LOG_SUBDIR="试金石" claude_run "$tmp"
+    ) || rc=$?
+    [ "$rc" -eq 4 ] && { warn "到预算上限,停在「$model」这一跑之前。已跑完的日志还在 $dir/"; return 1; }
+    [ "$rc" -ne 0 ] && { warn "「$model」这一跑没跑成(退出码 $rc),看日志:$(state_get last_log)"; return 1; }
+
+    # 第 6 条:配置里写的不等于真的用了——从调用日志里验实际模型
+    logf="$(state_get last_log)"
+    actual="$(python3 -c "
+import json,sys
+try:
+    d=json.load(open(sys.argv[1]))
+    ks=list((d.get('modelUsage') or {}).keys())
+    print(ks[0] if ks else '')
+except Exception:
+    print('')
+" "$logf.json")"
+    if [ "$actual" != "$model" ]; then
+      die "模型验证失败(第 6 条):要的是「$model」,调用日志里实际是「${actual:-读不到}」。这一轮作废,别拿它的产出当数。"
+    fi
+    ok "验明正身:这一跑真用的是 $actual(来自调用日志,不是配置)"
+    cp "$logf" "$dir/$ts-$leg.log"
+  done
+
+  # 分歧交给对分歧.py 数,它的三个检查逻辑这儿一个不碰
+  title "试金石 · 数分歧"
+  rule
+  out="$(python3 "$ROOT/scripts/对分歧.py" "$dir/$ts-pro.log" "$dir/$ts-flash.log")" || true
+  printf '%s\n' "$out"
+
+  # 全票 = 警报,不是通过。判据:判级不同 0 对,且两边都没有独有句
+  if printf '%s' "$out" | grep -q "不同 0 对" \
+     && printf '%s' "$out" | grep -q "前一份独有 0 句,后一份独有 0 句"; then
+    rule
+    warn "⚠ 全票一致——这是警报,不是让人放心。"
+    say  "  「全票通过应该触发警报,不是让人放心。」(工程交接包·核心一)"
+    say  "  两个脑子毫无分歧,通常说明它们在顺着同一个先验说话。"
+    say  "  实证:2026-08-18 那轮,两模型唯一全票一致判轻的那句,恰好就是判错的那句。"
+    say  "  建议:换一个不同家的模型再跑一遍,或人工复核判级表。"
+    rule
+    return 1
+  fi
+  say ""
+  say "分歧就是信息:吵起来的地方是模型差异,别动规则;两边一起错的地方才轮到规则(验证的规矩第 7 条)。"
+  say "两份原始产出:$dir/$ts-pro.log 和 $dir/$ts-flash.log"
+}
+
 cmd_status() {
   local stage; stage="$(state_get stage goal)"
   title "现在的进度"
@@ -2398,6 +2500,7 @@ cmd_help() {
   ./loop.sh start "你想做什么"   开始（一句话说清就行，不用想得多完整）
   ./loop.sh 答 "1A 2C ..."       回答第1步问你的那几个问题
   ./loop.sh 听 "任何一段话"       单独用：只把一段话拆开听懂，不开项目
+  ./loop.sh 试金石 "任何一段话"    两个模型各拆一遍，分歧数出来；全票一致会报警
   ./loop.sh go                   继续往下跑
   ./loop.sh status               看进度（终端）
   ./loop.sh 看板                 生成桌面看板：组织图＋群聊＋台账＋账单，双击就开
@@ -2474,6 +2577,7 @@ main() {
     start)   cmd_start "${1:-}" ;;
     answer|答|回答) cmd_answer "${1:-}" ;;
     listen|听) cmd_listen_once "${1:-}" ;;
+    touchstone|试金石) cmd_touchstone "${1:-}" ;;
     go|next|continue) cmd_go ;;
     status|st) cmd_status ;;
     ceo|操盘) cmd_ceo ;;
@@ -3583,6 +3687,18 @@ if [ -f scripts/test-数字漂移.sh ]; then
   run "数字漂移（文档命令数 vs loop.sh 实数）" bash scripts/test-数字漂移.sh
 fi
 
+# 对分歧：把两次「听懂」产出的差异数出来（漏判/判级差异/标记计数）。
+# 这工具是核心一「分歧要被量出来」的第一块，它自己坏了还绿着，分歧就又变回手感。
+if [ -f scripts/test-对分歧.sh ]; then
+  run "对分歧（漏判/判级差异/标记,数出来不许靠手感）" bash scripts/test-对分歧.sh
+fi
+
+# 试金石：两个模型跑同一段话、自动数分歧、全票报警、模型从日志验明正身。
+# 它是「换脑子是真的换了判断」这件事的自动化尺子。
+if [ -f scripts/test-试金石.sh ]; then
+  run "试金石（两脑对跑/分歧计数/全票报警/模型验身）" bash scripts/test-试金石.sh
+fi
+
 # ---------------- 已知失败区（撞到的真 bug，先记录、不修） ----------------
 if [ -d scripts/known-fail ]; then
   for kf in scripts/known-fail/test-*.sh; do
@@ -4471,6 +4587,97 @@ echo
 if [ "$FAILED" = 0 ]; then echo "第1步自测：全部通过"; else echo "第1步自测：有失败项"; fi
 exit "$FAILED"
 
+▼▼▼ FILE: scripts/test-对分歧.sh ▼▼▼
+#!/usr/bin/env bash
+# 对分歧工具的自测。不花钱、不联网。
+#
+# 守三件事:漏判抓得到、判级差异数得对、标记数得对——
+# 这工具要是自己坏了还绿着,分歧就又变回"手感"了。
+#
+# 想亲眼看它会红:BREAK=1 bash scripts/test-对分歧.sh
+#   会把沙盒里【工具本体】的漏判门槛改成 9999(等于把守恒检查掐掉),
+#   整句吞掉就抓不到了,下面的断言必须红。注入点在被测代码上,不在期望值上。
+
+set -uo pipefail
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+FAILED=0
+pass() { printf '  [通过] %s\n' "$1"; }
+fail() { printf '  [失败] %s\n' "$1"; FAILED=1; }
+
+SB="$(mktemp -d)"; trap 'rm -rf "$SB"' EXIT
+cp "$REPO/scripts/对分歧.py" "$SB/对分歧.py"
+
+if [ -n "${BREAK:-}" ]; then
+  sed -i 's/^门槛 = 6/门槛 = 9999/' "$SB/对分歧.py"
+fi
+
+# 假产出 A:三行全覆盖原话,标记 [推断]×1 [猜测]×1
+cat > "$SB/A.log" <<'EOF'
+# 00 · 我听到的
+
+原话：「我想做个小程序管老客户，老是忘了谁该回访，最好像微信那样打开就能用。」
+
+| # | 你原话里的哪句 | 这是什么 | 轻重 | 为什么这么判 |
+|---|---|---|---|---|
+| 1 | 「做个小程序管老客户」 | 方案 | ★ | 形态第8步定 |
+| 2 | 「老是忘了谁该回访」 | 痛点 | ★★★ | 频次词 |
+| 3 | 「像微信那样打开就能用」 | 参照物 | ★★★ | 参照物解决的问题才是重点 |
+
+他怕新工具麻烦 `[推断]`,我猜他默认自己会天天用 `[猜测]`
+EOF
+
+# 假产出 B:整句吞掉「像微信那样打开就能用」+ 第1句判级不同 + 标记 [推断]×2
+cat > "$SB/B.log" <<'EOF'
+原话：「我想做个小程序管老客户，老是忘了谁该回访，最好像微信那样打开就能用。」
+
+| # | 你原话里的哪句 | 这是什么 | 轻重 | 为什么这么判 |
+|---|---|---|---|---|
+| 1 | "做个小程序管老客户" | 方案 | ★★ | 说法不同 |
+| 2 | "老是忘了谁该回访" | 痛点 | ★★★ | 频次词 |
+
+推断甲 `[推断]`,推断乙 `[推断]`
+EOF
+
+echo
+echo "=== 对分歧工具自测 ==="
+
+# ---------- 一、单份跑:全覆盖的要干净,吞句的要报漏 ----------
+python3 "$SB/对分歧.py" "$SB/A.log" >/dev/null 2>&1
+[ "$?" = 0 ] && pass "全覆盖的产出:退出码 0" || fail "全覆盖的产出:退出码该是 0"
+
+python3 "$SB/对分歧.py" "$SB/B.log" >/dev/null 2>&1
+[ "$?" = 1 ] && pass "吞了一整句的产出:退出码 1" || fail "吞了一整句的产出:退出码该是 1"
+
+# ---------- 二、双份对比:三个数一个都不许错 ----------
+out="$(python3 "$SB/对分歧.py" "$SB/A.log" "$SB/B.log" 2>&1)"; rc=$?
+
+[ "$rc" = 1 ] && pass "对比模式发现漏判:退出码 1" || fail "对比模式发现漏判:退出码该是 1(实际 $rc)"
+
+echo "$out" | grep -q "B.log:漏判 1 处" \
+  && pass "漏判数对:B 漏 1 处" || fail "漏判数错:该报 B.log:漏判 1 处"
+echo "$out" | grep -q "像微信那样打开就能用" \
+  && pass "漏的正是被吞的那句(像微信那样…)" || fail "漏判清单里没有被吞的那句"
+echo "$out" | grep -q "A.log:漏判 0 处" \
+  && pass "没漏的不冤枉:A 漏 0 处" || fail "该报 A.log:漏判 0 处"
+
+echo "$out" | grep -q "相同 1 对,不同 1 对" \
+  && pass "判级差异数对:相同 1 / 不同 1" || fail "判级差异数错:该是 相同 1 对,不同 1 对"
+echo "$out" | grep -q "前一份独有 1 句" \
+  && pass "缺失数对:前一份独有 1 句" || fail "缺失数错:该报 前一份独有 1 句"
+
+echo "$out" | grep -q '差额:  \[事实\]×0  \[推断\]×1  \[猜测\]×1' \
+  && pass "标记差额对:[推断]差1 [猜测]差1" || fail "标记差额错"
+
+# ---------- 三、解析不了必须响,不许静默(跳过不等于通过) ----------
+printf '原话：「随便一句」\n没有表格\n' > "$SB/C.log"
+python3 "$SB/对分歧.py" "$SB/C.log" >/dev/null 2>&1
+[ "$?" = 2 ] && pass "没有判级表:退出码 2,不静默" || fail "没有判级表:退出码该是 2"
+
+echo
+if [ "$FAILED" = 0 ]; then echo "对分歧自测:全部通过"; else echo "对分歧自测:有失败项"; fi
+exit "$FAILED"
+
 ▼▼▼ FILE: scripts/test-接口.sh ▼▼▼
 #!/usr/bin/env bash
 # 「每个员工是不是真的一个独立接口」自测。
@@ -5109,6 +5316,116 @@ printf '%s' "$out3" | grep -q "风控 没交东西" \
 
 echo
 if [ "$FAILED" = 0 ]; then echo "论证自测：全部通过"; else echo "论证自测：有失败项"; fi
+exit "$FAILED"
+
+▼▼▼ FILE: scripts/test-试金石.sh ▼▼▼
+#!/usr/bin/env bash
+# 试金石命令的自测。不花钱、不联网(用假 claude)。
+#
+# 守四件事:
+#   1. 没设预算不让起跑(闸门前置,不许跑一半没钱)
+#   2. 两个模型各跑一次,分歧数出来(数字,不是"大致相同")
+#   3. 调用日志里的模型和要的对不上,必须当场死——配置写的不等于真用的(第 6 条)
+#   4. 分歧为 0 时必须报警,不许绿色通过——「全票通过应该触发警报,不是让人放心」
+#
+# 想亲眼看它会红:BREAK=1 bash scripts/test-试金石.sh
+#   会把沙盒里【loop.sh 本体】的模型验证掐掉(if 条件改成 false),
+#   于是说谎的模型溜过去,第 3 件事的断言必须红。注入点在被测代码上。
+
+set -uo pipefail
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+FAILED=0
+pass() { printf '  [通过] %s\n' "$1"; }
+fail() { printf '  [失败] %s\n' "$1"; FAILED=1; }
+
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+
+# ---- 沙盒:整套拷进去,不碰真仓库的 .loop ----
+SB="$TMP/sandbox"
+mkdir -p "$SB/.claude/commands" "$SB/.loop/接口"
+cp "$REPO/loop.sh" "$SB/"
+cp -r "$REPO/scripts" "$SB/"
+rm -rf "$SB/scripts/__pycache__"
+cp "$REPO/.claude/commands/听懂.md" "$SB/.claude/commands/"
+chmod +x "$SB/loop.sh"
+printf 'ANTHROPIC_AUTH_TOKEN=fake-key-for-test\nunset ANTHROPIC_API_KEY\n' > "$SB/.loop/接口/deepseek.key"
+
+if [ -n "${BREAK:-}" ]; then
+  sed -i 's/if \[ "\$actual" != "\$model" \]; then/if false; then/' "$SB/loop.sh"
+fi
+
+# ---- 假 claude:不联网,按收到的环境变量报模型;能被指使说谎/输出全一致 ----
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/claude" <<'FAKE'
+#!/usr/bin/env bash
+cat > /dev/null
+rep="${ANTHROPIC_MODEL:-?}"
+[ -n "${FAKE_LIE:-}" ] && rep="deepseek-v4-pro"
+variant="${ANTHROPIC_MODEL:-?}"
+[ -n "${FAKE_SAME:-}" ] && variant="deepseek-v4-pro"
+python3 - "$rep" "$variant" <<'PY'
+import json, sys
+rep, variant = sys.argv[1], sys.argv[2]
+star1 = "★★" if variant == "deepseek-v4-pro" else "★"
+result = f"""# 00 · 我听到的
+
+原话：「我要一个记账的东西，老是忘了记。」
+
+| # | 你原话里的哪句 | 这是什么 | 轻重 | 为什么这么判 |
+|---|---|---|---|---|
+| 1 | 「我要一个记账的东西」 | 方案 | {star1} | 方案不是问题 |
+| 2 | 「老是忘了记」 | 痛点 | ★★★ | 频次词 |
+
+一点推断 `[推断]`
+"""
+print(json.dumps({"result": result, "total_cost_usd": 0.01, "duration_ms": 5,
+                  "modelUsage": {rep: {"inputTokens": 1, "outputTokens": 1}}}))
+PY
+FAKE
+chmod +x "$TMP/bin/claude"
+
+run() { ( cd "$SB" && CLAUDE_BIN="$TMP/bin/claude" ./loop.sh "$@" ); }
+
+echo
+echo "=== 试金石自测 ==="
+
+# ---------- 一、没设预算不让起跑 ----------
+out="$(run 试金石 "随便一句" 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "budget" \
+  && pass "没设预算:拦住了,并指路 budget" \
+  || fail "没设预算:该拦住并提示设上限(rc=$rc)"
+
+echo 5 > "$SB/.loop/budget"
+
+# ---------- 二、正常跑:两腿都验明正身,分歧是数字 ----------
+out="$(run 试金石 "随便一句" 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] && pass "两腿都跑完:退出码 0" || fail "两腿该跑完(rc=$rc)"
+printf '%s' "$out" | grep -q "真用的是 deepseek-v4-pro" \
+  && pass "pro 腿验明正身(从调用日志)" || fail "没验出 pro 腿的真实模型"
+printf '%s' "$out" | grep -q "真用的是 deepseek-v4-flash" \
+  && pass "flash 腿验明正身(从调用日志)" || fail "没验出 flash 腿的真实模型"
+printf '%s' "$out" | grep -q "相同 1 对,不同 1 对" \
+  && pass "分歧是数字:相同 1 / 不同 1" || fail "分歧没数出来(该是 相同 1 对,不同 1 对)"
+printf '%s' "$out" | grep -q "全票一致——这是警报" \
+  && fail "有分歧还报了全票警报" || pass "有分歧时没有误报警报"
+
+# ---------- 三、模型说谎必须当场死(第 6 条) ----------
+out="$(FAKE_LIE=1 run 试金石 "随便一句" 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "模型验证失败" \
+  && pass "说谎的模型被当场抓住,命令非零退出" \
+  || fail "模型说谎没被抓住——配置写的不等于真用的(rc=$rc)"
+
+# ---------- 四、全票一致必须报警,不许绿色通过 ----------
+out="$(FAKE_SAME=1 run 试金石 "随便一句" 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && pass "全票时退出码非 0(不算通过)" || fail "全票时退出码该非 0(rc=$rc)"
+printf '%s' "$out" | grep -q "全票一致——这是警报" \
+  && pass "全票时打出了警报" || fail "全票时没报警"
+printf '%s' "$out" | grep -q "全票通过应该触发警报" \
+  && pass "警报里带着交接包那句原话" || fail "警报里少了交接包那句原话"
+
+echo
+if [ "$FAILED" = 0 ]; then echo "试金石自测:全部通过"; else echo "试金石自测:有失败项"; fi
 exit "$FAILED"
 
 ▼▼▼ FILE: tests/test_状态.py ▼▼▼
