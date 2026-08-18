@@ -1,0 +1,4 @@
+{
+  "name": "OIC · 商业操盘手",
+  "install": "set -e; python3 --version; if ! command -v python >/dev/null 2>&1; then sudo ln -sf \"$(command -v python3)\" /usr/local/bin/python; fi; python --version; if [ -d oic ]; then python -m compileall -q oic tests; fi"
+}
