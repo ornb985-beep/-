@@ -30,3 +30,6 @@ target/
 .claude/settings.local.json
 work/
 看板.html
+
+# 赛马：每个想法自己的地盘（状态和产出），跟 .loop/ 一样不进版本库
+赛马/

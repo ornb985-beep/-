@@ -2565,6 +2565,268 @@ EOF
 }
 
 # ============================================================
+# ============================================================
+# 夜班 · 赛马
+#
+# 为什么是赛马而不是"一个项目往下推"：
+# 这套东西真正的瓶颈不是 token，是老板早上的判断带宽。
+# 一晚上烧一百块换二百页文档，那是作业不是产出。
+# 所以夜里的活必须是【自己淘汰】——早上他只做一个动作：砍。
+# 完整设计见 references/夜班.md
+#
+# 关键约束：夜里只做可逆的事（想、查、写、算）。
+# 花生意的钱／对外发东西／不可逆操作，一条都不碰。
+# ============================================================
+
+RACE_DIR="$ROOT/赛马"
+IDEA_BOX="$RACE_DIR/想法箱.tsv"
+RACE_LOG="$RACE_DIR/台账.tsv"
+
+race_init() {
+  mkdir -p "$RACE_DIR"
+  [ -f "$IDEA_BOX" ] || printf '编号\t一句话\t状态\t建于\n' > "$IDEA_BOX"
+  [ -f "$RACE_LOG" ] || printf '时间\t编号\t干了什么\t退出码\t这一轮花了\t停在哪一步\n' > "$RACE_LOG"
+}
+
+# 想法箱里所有编号（不含表头）
+race_ids() { [ -f "$IDEA_BOX" ] && awk -F'\t' 'NR>1 && $1!="" {print $1}' "$IDEA_BOX" || true; }
+
+race_field() {  # race_field <编号> <第几列>
+  [ -f "$IDEA_BOX" ] || return 0
+  awk -F'\t' -v id="$1" -v c="$2" 'NR>1 && $1==id {print $c; exit}' "$IDEA_BOX"
+}
+
+race_set_status() {  # race_set_status <编号> <新状态>
+  local tmp; tmp="$(mktemp)"
+  awk -F'\t' -v OFS='\t' -v id="$1" -v st="$2" \
+    'NR==1 {print; next} $1==id {$3=st} {print}' "$IDEA_BOX" > "$tmp"
+  mv "$tmp" "$IDEA_BOX"
+}
+
+race_dir_of() { printf '%s/%s' "$RACE_DIR" "$1"; }
+
+# 这个想法自己花了多少（各想法的账本是分开的）
+race_cost() {
+  local f; f="$(race_dir_of "$1")/.loop/cost.tsv"
+  [ -f "$f" ] || { echo 0; return; }
+  awk -F'\t' 'NR>1 && $3!="" { t += $3 } END { printf "%.2f", t+0 }' "$f"
+}
+
+race_stage() {
+  local f; f="$(race_dir_of "$1")/.loop/stage"
+  [ -f "$f" ] && cat "$f" || echo 听懂
+}
+
+# 可行性：从这个想法的文档里捞一个百分数。捞不到就是「还没算出来」。
+# 这是个尽力而为的读数，不是断言——所以它在战报里标着「文档里写的」。
+race_feasibility() {
+  local d; d="$(race_dir_of "$1")/docs"
+  [ -d "$d" ] || { echo "—"; return; }
+  local v
+  v="$(grep -rhoE '可行性[^0-9]{0,8}([0-9]{1,3})%' "$d" 2>/dev/null | grep -oE '[0-9]{1,3}%' | tail -1 || true)"
+  [ -n "$v" ] && echo "$v" || echo "—"
+}
+
+race_rounds() { state_file_int "$(race_dir_of "$1")/.loop/夜班轮次"; }
+state_file_int() { [ -f "$1" ] && cat "$1" || echo 0; }
+
+cmd_idea() {   # 想法 "一句话"
+  local one="${1:-}"
+  [ -n "$one" ] || die '用法：./loop.sh 想法 "一句话说清楚你想做什么"'
+  race_init
+
+  local id n=1
+  while :; do
+    id="$(printf '%03d' "$n")"
+    [ -d "$RACE_DIR/$id" ] || break
+    n=$((n+1))
+  done
+
+  local d="$RACE_DIR/$id"
+  mkdir -p "$d/docs" "$d/.loop"
+
+  # 参考资料、规矩、提示词共用仓库那一份。
+  # 【不许拷贝】——拷贝了就会各自漂，改一处忘一处，正是规矩三骂的那件事。
+  ln -sfn "$ROOT/references" "$d/references"
+  ln -sfn "$ROOT/.claude"    "$d/.claude"
+  ln -sfn "$ROOT/CLAUDE.md"  "$d/CLAUDE.md"
+
+  printf '%s\n' "$one" > "$d/.loop/原始想法.txt"
+  printf '听懂'          > "$d/.loop/stage"
+  printf '%s\t%s\t%s\t%s\n' "$id" "$one" 在跑 "$(date +%F)" >> "$IDEA_BOX"
+
+  ok "收进想法箱：[$id] $one"
+  say "${C_DIM}现在不花钱，它在队列里等着。夜里跑：${C_OFF}${C_BOLD}./loop.sh 夜班${C_OFF}"
+}
+
+# 挑下一个该跑谁：跑过轮数最少的那个「在跑」的想法。
+# 为什么是最少的：赛马要公平——不能让第一个想法把整晚吃光，
+# 那就退化成"一个项目挖到底"了。
+race_pick() {
+  local best="" bestn=999999 id st n
+  for id in $(race_ids); do
+    st="$(race_field "$id" 3)"
+    [ "$st" = "在跑" ] || continue
+    n="$(race_rounds "$id")"
+    if [ "$n" -lt "$bestn" ]; then bestn="$n"; best="$id"; fi
+  done
+  printf '%s' "$best"
+}
+
+cmd_night() {   # 夜班 [跑几小时，默认 8]
+  race_init
+  local hours="${1:-8}"
+  case "$hours" in ''|*[!0-9]*) die '用法：./loop.sh 夜班 [跑几小时，默认 8]' ;; esac
+
+  local live; live="$(race_ids | wc -l | tr -d ' ')"
+  if [ "$live" -eq 0 ]; then
+    rule
+    warn "想法箱是空的，没活可干。"
+    say  "先丢几个想法进去：${C_BOLD}./loop.sh 想法 \"一句话\"${C_OFF}"
+    say  "${C_DIM}赛马要 5~10 个才有意思——只有一个的话，那不叫赛马，叫深挖。${C_OFF}"
+    rule
+    return 1
+  fi
+
+  # 停机条件之一：地基是红的就不许生产。
+  # 不拦的话，一整晚的产出全建立在一个坏掉的系统上，而且每一步看着都是 ✓。
+  # LOOP_NIGHT_CHECK 存在的唯一理由是【让这道闸门本身可测】：
+  # 自测要能同时验"绿了才放行"和"红了真的拦住"，就得能换一把假尺子进来。
+  # 不许拿它当绕过闸门的开关——绕过去等于把这道闸门删了。
+  if ! bash "${LOOP_NIGHT_CHECK:-$ROOT/scripts/check.sh}" >/dev/null 2>&1; then
+    rule
+    warn "自检没过，今晚不跑。"
+    say  "先跑 ${C_BOLD}bash scripts/check.sh${C_OFF} 看哪儿红了。"
+    say  "${C_DIM}在坏地基上生产一整晚，等于一整晚白烧。${C_OFF}"
+    rule
+    return 1
+  fi
+
+  local deadline=$(( $(date +%s) + hours * 3600 ))
+  local maxr="${LOOP_NIGHT_MAX:-200}"
+  local n=0 id rc cur now before after
+
+  rule
+  title "夜班开始 · $(date '+%m-%d %H:%M')"
+  say "  想法箱里 $live 个，最多跑 $hours 小时 / $maxr 轮"
+  say "${C_DIM}  撞到下面任何一条就停：到点 ／ 轮数到顶 ／ 预算到顶 ／ 所有想法都在等你${C_OFF}"
+  rule
+
+  while :; do
+    [ "$(date +%s)" -ge "$deadline" ] && { info "到点了，收工。"; break; }
+    [ "$n" -ge "$maxr" ] && { info "跑满 $maxr 轮，收工。"; break; }
+    budget_ok || break
+
+    id="$(race_pick)"
+    [ -n "$id" ] || { info "所有想法都停下等你了，收工。"; break; }
+
+    n=$((n+1))
+    local d; d="$(race_dir_of "$id")"
+    before="$(race_stage "$id")"
+    local c0; c0="$(race_cost "$id")"
+
+    printf '\n%s第 %d 轮 · [%s] %s（现在在：%s）%s\n' \
+      "$C_DIM" "$n" "$id" "$(race_field "$id" 2)" "$(stage_label "$before")" "$C_OFF"
+
+    rc=0
+    ( cd "$d" && LOOP_HOME="$PWD" "$ROOT/loop.sh" go ) || rc=$?
+    after="$(race_stage "$id")"
+
+    local c1 spent
+    c1="$(race_cost "$id")"
+    spent="$(awk -v a="$c1" -v b="$c0" 'BEGIN{printf "%.2f", a-b}')"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$(date '+%F %H:%M')" "$id" "推进" "$rc" "$spent" "$after" >> "$RACE_LOG"
+
+    printf '%s' "$(( $(race_rounds "$id") + 1 ))" > "$d/.loop/夜班轮次"
+
+    case "$rc" in
+      2) race_set_status "$id" "等你"
+         say "${C_DIM}  [$id] 停下等你拍板，先放一边，换下一个。${C_OFF}" ;;
+      3) race_set_status "$id" "等你"
+         say "${C_DIM}  [$id] 跑不动（没装 claude），先放一边。${C_OFF}" ;;
+      0) if [ "$after" = "$before" ]; then
+           # 阶段没动。跑了一轮却原地不动，再跑一轮多半还是一样，别空转。
+           race_set_status "$id" "等你"
+           say "${C_DIM}  [$id] 这一轮没往前动，先放一边。${C_OFF}"
+         fi
+         [ "$after" = "done" ] && race_set_status "$id" "跑完了" ;;
+      4) break ;;   # 预算闸门
+      *) race_set_status "$id" "卡住"
+         say "${C_DIM}  [$id] 卡住了（退出码 $rc），先放一边。${C_OFF}" ;;
+    esac
+  done
+
+  rule
+  say "夜班结束，跑了 $n 轮。战报："
+  cmd_morning
+}
+
+cmd_morning() {   # 战报 · 早上那一页
+  race_init
+  local ids; ids="$(race_ids)"
+  if [ -z "$ids" ]; then warn "想法箱是空的。"; return 0; fi
+
+  local total=0 id
+  for id in $ids; do
+    total="$(awk -v a="$total" -v b="$(race_cost "$id")" 'BEGIN{printf "%.2f", a+b}')"
+  done
+
+  local rounds=0
+  [ -f "$RACE_LOG" ] && rounds="$(awk 'NR>1' "$RACE_LOG" | wc -l | tr -d ' ')"
+
+  rule
+  title "战报 · $(date '+%m-%d %H:%M')"
+  say "  累计跑了 $rounds 轮，花了 \$$total"
+  rule
+  printf '%s  %s %s %s %s%s\n' "$C_DIM" \
+    "$(pad 编号 6)" "$(pad 状态 10)" "$(pad 可行性 8)" "$(pad 跑到 8)" "$C_OFF"
+
+  for id in $ids; do
+    printf '  %s %s %s %s %s\n' \
+      "$(pad "$id" 6)" \
+      "$(pad "$(race_field "$id" 3)" 10)" \
+      "$(pad "$(race_feasibility "$id")" 8)" \
+      "$(pad "第$(stage_num "$(race_stage "$id")")步" 8)" \
+      "$(race_field "$id" 2)"
+  done
+
+  rule
+  # 注意这个 || true：for 循环最后一轮的 [ ] 判假会返回 1，
+  # 配上 set -e 会把整个战报从这儿掐断——这个坑这项目栽过好几次了。
+  local waiting; waiting="$(for id in $ids; do
+    [ "$(race_field "$id" 3)" = "等你" ] && echo "$id"; done | tr '\n' ' ' || true)"
+
+  if [ -n "$waiting" ]; then
+    title "要你拍板的"
+    for id in $waiting; do
+      say "  ${C_BOLD}[$id]${C_OFF} $(race_field "$id" 2)"
+      say "${C_DIM}     它停在「$(stage_label "$(race_stage "$id")")」。看它问了什么：${C_OFF}"
+      say "${C_DIM}     cd 赛马/$id && LOOP_HOME=\"\$PWD\" $ROOT/loop.sh status${C_OFF}"
+    done
+    rule
+  fi
+
+  say "你早上只做一个动作：${C_BOLD}砍${C_OFF}。"
+  say "${C_DIM}  砍掉：./loop.sh 砍 003      留下继续跑：./loop.sh 留 003${C_OFF}"
+  say "${C_DIM}  砍比批准快十倍，而且砍错了看得出来，批准错了看不出来。${C_OFF}"
+  rule
+}
+
+cmd_kill_idea() {
+  local id="${1:-}"; [ -n "$id" ] || die '用法：./loop.sh 砍 <编号>'
+  [ -d "$(race_dir_of "$id")" ] || die "没有这个编号：$id"
+  race_set_status "$id" "淘汰"
+  ok "[$id] 淘汰了。东西还在 赛马/$id/ 里，随时能翻，但夜班不再跑它。"
+}
+
+cmd_keep_idea() {
+  local id="${1:-}"; [ -n "$id" ] || die '用法：./loop.sh 留 <编号>'
+  [ -d "$(race_dir_of "$id")" ] || die "没有这个编号：$id"
+  race_set_status "$id" "在跑"
+  ok "[$id] 放回跑道，今晚接着跑。"
+}
+
 main() {
   local sub="${1:-help}"; shift || true
   case "$sub" in
@@ -2602,6 +2864,11 @@ main() {
     argue|论证) cmd_argue ;;
     provider|接口|换脑子) cmd_provider "${1:-}" "${2:-}" "${3:-}" ;;
     auto|自动) cmd_auto ;;
+    idea|想法) cmd_idea "${1:-}" ;;
+    night|夜班) cmd_night "${1:-}" ;;
+    morning|战报) cmd_morning ;;
+    kill|砍) cmd_kill_idea "${1:-}" ;;
+    keep|留) cmd_keep_idea "${1:-}" ;;
     budget|预算) cmd_budget "${1:-}" ;;
     close|结项) cmd_close ;;
     hire|招人) shift 0; cmd_hire "$@" ;;

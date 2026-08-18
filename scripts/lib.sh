@@ -38,9 +38,20 @@ rule()  { printf '%s%s%s\n' "$C_DIM" "──────────────
 # ---------- 路径 ----------
 # ROOT 由调用方设置；这里兜底
 ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-STATE_DIR="$ROOT/.loop"
+
+# ROOT 和 LOOP_HOME 是两件事，别混：
+#   ROOT      = 仓库本身。提示词、参考资料、角色模板在这儿，所有想法共用一份
+#   LOOP_HOME = 【这一个想法】的地盘。它的状态和文档在这儿，各想法互不干扰
+#
+# 默认两者相同，行为跟以前一模一样（一个仓库跑一个项目）。
+# 赛马模式给每个想法一块自己的地盘，进那个目录里跑：
+#   cd 赛马/003 && LOOP_HOME="$PWD" /path/to/repo/loop.sh go
+# 这样 claude 的工作目录也在那个想法里，它写的 docs/ 自然落在自己家，
+# 不会几个想法互相覆盖。
+LOOP_HOME="${LOOP_HOME:-$ROOT}"
+STATE_DIR="$LOOP_HOME/.loop"
 LOG_DIR="$STATE_DIR/log"
-DOC_DIR="$ROOT/docs"
+DOC_DIR="$LOOP_HOME/docs"
 CMD_DIR="$ROOT/.claude/commands"
 
 # ---------- 状态读写（纯文本，不依赖 jq） ----------

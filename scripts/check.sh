@@ -206,6 +206,13 @@ if [ -f scripts/test-试金石.sh ]; then
   run "试金石（两脑对跑/分歧计数/全票报警/模型验身）" bash scripts/test-试金石.sh
 fi
 
+# 夜班：多个想法赛马，老板睡着的时候跑。
+# 最贵的失败方式不是报错，是一整晚都在跑同一个想法、或者对着一堵墙撞——
+# 屏幕一样热闹，钱一样花，而没人看着。
+if [ -f scripts/test-夜班.sh ]; then
+  run "夜班（赛马轮转/停下不再捞/台账落盘/地盘隔离）" bash scripts/test-夜班.sh
+fi
+
 # ---------------- 已知失败区（撞到的真 bug，先记录、不修） ----------------
 if [ -d scripts/known-fail ]; then
   for kf in scripts/known-fail/test-*.sh; do
