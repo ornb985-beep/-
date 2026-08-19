@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MoneyLoop</title>
+<style>
+/* ─────────────────────────────────────────────────────────────
+   排版按 借鉴-Manus.md 那五条来：
+   双栏（左过程右成果）· 每步状态标签 · 钱永远可见 · 分歧红绿灯 · 一键回看
+   ───────────────────────────────────────────────────────────── */
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0b1014; --panel:#111820; --panel2:#161f29; --line:#1e2a36; --line2:#2a3947;
+  --ink:#e6edf3; --ink2:#93a5b5; --ink3:#5f7385;
+  --blue:#5b9dd9; --ok:#4bb98a; --warn:#d8a45f; --bad:#d46f5e; --gold:#c9a86a;
+  --r:10px;
+}
+/* 背景要画在 html 上：body 只画自己那个盒子，页面比屏幕矮的时候
+   下面那一条会露出画布的底色，看着像块黑斑。 */
+html{height:100%;background:#0b1014}
+body{height:100%;min-height:100vh}
+body{
+  background:var(--bg);color:var(--ink);overflow:hidden;
+  font:15px/1.7 "PingFang SC","Hiragino Sans GB","Noto Sans SC","Microsoft YaHei",system-ui,-apple-system,sans-serif;
+  display:flex;flex-direction:column;-webkit-font-smoothing:antialiased;
+}
+button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
+button:disabled{opacity:.38;cursor:not-allowed}
+
+/* ── 顶栏：钱永远在这儿 ── */
+.top{display:flex;align-items:center;gap:18px;padding:12px 22px;
+  background:var(--panel);border-bottom:1px solid var(--line);flex:0 0 auto}
+.brand{font-size:15px;letter-spacing:.14em;color:var(--gold);font-weight:500;white-space:nowrap}
+.money{display:flex;align-items:center;gap:10px;min-width:280px}
+.bar{flex:1;height:5px;border-radius:3px;background:var(--line2);overflow:hidden;min-width:90px}
+.bar i{display:block;height:100%;background:var(--ok);transition:width .5s ease,background .3s}
+.bar.hot i{background:var(--warn)} .bar.over i{background:var(--bad)}
+.money b{font-weight:600;font-variant-numeric:tabular-nums}
+.money small{color:var(--ink3)}
+.spacer{flex:1}
+.pill{padding:4px 11px;border:1px solid var(--line2);border-radius:20px;
+  font-size:12.5px;color:var(--ink2);white-space:nowrap}
+.pill.live{border-color:#2f5f45;color:var(--ok)}
+.pill.live::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;
+  background:var(--ok);margin-right:6px;vertical-align:1px;animation:bl 1.4s infinite}
+@keyframes bl{50%{opacity:.25}}
+.stop{padding:5px 15px;border:1px solid #5a3630;border-radius:7px;color:#e8917f;font-size:13.5px}
+.stop:not(:disabled):hover{background:#2a1a17}
+
+/* ── 主体：双栏 ── */
+.main{flex:1 1 auto;display:flex;min-height:0}
+.left{width:340px;flex:0 0 340px;border-right:1px solid var(--line);
+  display:flex;flex-direction:column;min-height:0;background:#0e141a}
+.right{flex:1;display:flex;flex-direction:column;min-height:0}
+.hd{padding:11px 18px 9px;font-size:12px;letter-spacing:.1em;color:var(--ink3);
+  border-bottom:1px solid var(--line);flex:0 0 auto}
+
+/* ── 左：十步 ── */
+.steps{overflow-y:auto;padding:8px 10px;flex:0 0 auto;max-height:46%}
+.step{display:flex;gap:10px;align-items:flex-start;padding:7px 9px;border-radius:8px;
+  font-size:13.5px;line-height:1.5}
+.step .m{width:17px;flex:0 0 17px;text-align:center;color:var(--ink3);font-size:12px}
+.step .t{flex:1;color:var(--ink2)}
+.step .g{font-size:11px;color:var(--ink3);border:1px solid var(--line2);
+  border-radius:4px;padding:0 5px;white-space:nowrap;align-self:center}
+.step.done .m{color:var(--ok)} .step.done .t{color:var(--ink2)}
+.step.now{background:#16222e} .step.now .m{color:var(--blue)}
+.step.now .t{color:var(--ink);font-weight:600}
+.step.stuck .m{color:var(--bad)} .step.stuck .t{color:#e8a094}
+.why{font-size:12px;line-height:1.5;color:#c98c80;margin:-3px 9px 6px 36px;
+  padding:5px 9px;border-left:2px solid #5a3630;background:#1a1210;border-radius:0 6px 6px 0}
+
+/* ── 左下：过程日志 ── */
+.logwrap{flex:1;display:flex;flex-direction:column;min-height:0;border-top:1px solid var(--line)}
+.log{flex:1;overflow-y:auto;padding:10px 16px 18px;
+  font:12.5px/1.65 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  color:var(--ink2);white-space:pre-wrap;word-break:break-word}
+.log .empty{color:var(--ink3);font-family:inherit;font-size:13px}
+
+/* ── 右：成果 ── */
+.tabs{display:flex;gap:4px;padding:8px 16px;border-bottom:1px solid var(--line);
+  overflow-x:auto;flex:0 0 auto}
+.tab{padding:5px 12px;border-radius:7px;font-size:13px;color:var(--ink3);white-space:nowrap}
+.tab:hover{color:var(--ink2);background:var(--panel2)}
+.tab.on{background:var(--panel2);color:var(--ink)}
+.tab.no{opacity:.35}
+.doc{flex:1;overflow-y:auto;padding:26px 40px 60px;max-width:900px;width:100%}
+.doc.empty{display:flex;align-items:center;justify-content:center;color:var(--ink3);font-size:14px}
+.doc h1{font-size:21px;margin:0 0 16px;padding-bottom:12px;border-bottom:1px solid var(--line)}
+.doc h2{font-size:16.5px;margin:26px 0 10px;color:var(--gold)}
+.doc h3{font-size:14.5px;margin:18px 0 7px;color:var(--ink)}
+.doc p{margin:9px 0;color:var(--ink2)}
+.doc li{margin:5px 0 5px 20px;color:var(--ink2)}
+.doc strong{color:var(--ink);font-weight:600}
+.doc code{background:var(--panel2);padding:1px 6px;border-radius:4px;font-size:.9em;color:var(--gold)}
+.doc pre{background:var(--panel);border:1px solid var(--line);border-radius:8px;
+  padding:12px 15px;overflow-x:auto;margin:12px 0;font-size:12.5px}
+.doc pre code{background:none;padding:0;color:var(--ink2)}
+.doc table{border-collapse:collapse;margin:14px 0;font-size:13.5px;width:100%}
+.doc th,.doc td{border:1px solid var(--line2);padding:7px 11px;text-align:left}
+.doc th{background:var(--panel2);color:var(--ink)}
+.doc td{color:var(--ink2)}
+.doc blockquote{border-left:3px solid var(--line2);padding-left:14px;margin:12px 0;color:var(--ink3)}
+.doc hr{border:none;border-top:1px solid var(--line);margin:22px 0}
+.tag{font-size:11.5px;padding:1px 6px;border-radius:4px;border:1px solid;white-space:nowrap}
+.tag.f{color:var(--ok);border-color:#2f5f45}
+.tag.r{color:var(--blue);border-color:#2b4a63}
+.tag.g{color:var(--warn);border-color:#5c4526}
+
+/* ── 底：轮到你了（这一块是整个界面的心脏）── */
+.ask{flex:0 0 auto;border-top:1px solid var(--line2);background:var(--panel);
+  padding:16px 22px 18px;max-height:44vh;overflow-y:auto}
+.ask .cap{font-size:12px;letter-spacing:.12em;color:var(--gold);margin-bottom:9px}
+.ask .cap b{color:var(--ink3);font-weight:400;letter-spacing:0;margin-left:8px}
+.ask .q{font-size:16.5px;line-height:1.6;margin-bottom:14px;font-weight:600}
+.opts{display:flex;flex-wrap:wrap;gap:9px}
+.opt{display:flex;gap:9px;align-items:flex-start;text-align:left;
+  padding:11px 15px;border:1px solid var(--line2);border-radius:9px;
+  background:var(--panel2);font-size:14px;line-height:1.55;
+  flex:1 1 260px;max-width:100%;transition:border-color .15s,background .15s}
+.opt:not(:disabled):hover{border-color:var(--blue);background:#182633}
+.opt .k{color:var(--gold);font-weight:700;flex:0 0 auto}
+.opt.dunno{flex:0 0 auto;color:var(--ink3);background:none}
+.opt.dunno:not(:disabled):hover{border-color:var(--ink3);background:var(--panel2)}
+.freewrap{display:flex;gap:9px;margin-top:11px}
+.freewrap input{flex:1;background:var(--bg);border:1px solid var(--line2);border-radius:8px;
+  padding:10px 14px;color:var(--ink);font:inherit;font-size:14px}
+.freewrap input:focus{outline:none;border-color:var(--blue)}
+.send{padding:10px 20px;border:1px solid var(--line2);border-radius:8px;font-size:14px}
+.send:not(:disabled):hover{border-color:var(--blue)}
+
+/* ── 底：没题的时候，显示可以点的下一步 ── */
+.acts{display:flex;flex-wrap:wrap;gap:9px;align-items:center}
+.act{padding:10px 17px;border:1px solid var(--line2);border-radius:9px;background:var(--panel2);font-size:14px}
+.act:not(:disabled):hover{border-color:var(--blue);background:#182633}
+.act .c{display:block;font-size:11.5px;color:var(--ink3);margin-top:2px}
+.act.go{border-color:#2f5f45;color:#8fd9b8}
+.act.go:not(:disabled):hover{background:#15271f;border-color:var(--ok)}
+.note{font-size:12.5px;color:var(--ink3);margin-top:11px}
+
+@media (max-width:900px){
+  .main{flex-direction:column}
+  .left{width:auto;flex:0 0 auto;max-height:42%;border-right:none;border-bottom:1px solid var(--line)}
+  .doc{padding:18px 20px 40px}
+}
+</style></head>
+<body>
+
+<div class="top">
+  <div class="brand">MoneyLoop</div>
+  <div class="money" id="money"></div>
+  <div class="spacer"></div>
+  <div class="pill" id="jobPill">空闲</div>
+  <button class="stop" id="btnStop" disabled>停</button>
+</div>
+
+<div class="main">
+  <div class="left">
+    <div class="hd">现在在干什么</div>
+    <div class="steps" id="steps"></div>
+    <div class="logwrap">
+      <div class="hd">过程</div>
+      <div class="log" id="log"><span class="empty">还没跑过东西。</span></div>
+    </div>
+  </div>
+  <div class="right">
+    <div class="tabs" id="tabs"></div>
+    <div class="doc empty" id="doc">左边选一步，这里显示它的成果。</div>
+  </div>
+</div>
+
+<div class="ask" id="ask"></div>
+
+<script>
+const TOKEN = "__TOKEN__";
+let S = null, ASK = null, curDoc = null, logFrom = 0, busy = false, pinned = false;
+
+const $ = s => document.querySelector(s);
+const esc = s => (s||"").replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function api(path, body){
+  const o = {headers:{"X-Token":TOKEN,"Content-Type":"application/json"}};
+  if (body){ o.method="POST"; o.body=JSON.stringify(body); }
+  const r = await fetch(path, o);
+  return r.json().catch(()=>({error:"服务端没给回话"}));
+}
+
+/* ── 钱：永远可见 ── */
+function drawMoney(){
+  const spent = +(S.spent||0), bud = parseFloat(S.budget||"");
+  if (!bud){
+    $("#money").innerHTML = `<b>已花 $${spent.toFixed(2)}</b><small>没设上限</small>`;
+    return;
+  }
+  const pct = Math.min(100, spent/bud*100);
+  const cls = pct>=100 ? "over" : pct>=70 ? "hot" : "";
+  $("#money").innerHTML =
+    `<b>$${spent.toFixed(2)}</b><small>／ $${bud}</small>` +
+    `<span class="bar ${cls}"><i style="width:${pct}%"></i></span>` +
+    `<small>还剩 $${Math.max(0,bud-spent).toFixed(2)}</small>`;
+}
+
+/* ── 左：十步 ── */
+function drawSteps(){
+  const st = (S.steps||[]).filter(s => s.key !== "done");
+  $("#steps").innerHTML = st.map(s => {
+    // 「跑过了但该产出的文件不在」＝卡住了，不是做完了（第 6 条）
+    const stuck = s.state==="now" && s.ran && s.doc && !s.has_doc;
+    const cls = stuck ? "stuck" : s.state;
+    const mark = stuck ? "!" : s.state==="done" ? "✓" : s.state==="now" ? "▸" : "·";
+    const gate = s.signoff && !s.signed
+      ? `<span class="g">${s.state==="now" ? "等你拍板" : "要你拍板"}</span>` : "";
+    return `<div class="step ${cls}" data-doc="${esc(s.doc||"")}">`
+      + `<span class="m">${mark}</span><span class="t">${s.n+1}　${esc(s.label)}</span>${gate}</div>`
+      + (stuck ? `<div class="why">跑过了，但 ${esc(s.doc)} 没出来 —— 按「没做成」算</div>` : "");
+  }).join("");
+  document.querySelectorAll(".step[data-doc]").forEach(el => {
+    const d = el.dataset.doc;
+    if (d) el.onclick = () => { pinned = true; openDoc(d); };
+  });
+}
+
+/* ── 右：成果 ── */
+function drawTabs(){
+  const st = (S.steps||[]).filter(s => s.doc);
+  $("#tabs").innerHTML = st.map(s =>
+    `<button class="tab ${s.doc===curDoc?"on":""} ${s.has_doc?"":"no"}" data-doc="${esc(s.doc)}">`
+    + `${esc(s.label)}</button>`).join("");
+  document.querySelectorAll(".tab").forEach(b =>
+    b.onclick = () => { pinned = true; openDoc(b.dataset.doc); });
+}
+
+async function openDoc(name){
+  if (!name) return;
+  curDoc = name; drawTabs();
+  const r = await api("/api/doc?name=" + encodeURIComponent(name) + "&token=" + TOKEN);
+  const box = $("#doc");
+  if (!r.text){ box.className="doc empty"; box.textContent = "这一步还没有产出。"; return; }
+  box.className = "doc"; box.innerHTML = md(r.text); box.scrollTop = 0;
+}
+
+/* markdown → html。只认这套东西真会用到的那几种，够用就行 */
+function md(t){
+  const tag = s => s
+    .replace(/\[事实\]/g,'<span class="tag f">事实</span>')
+    .replace(/\[推断\]/g,'<span class="tag r">推断</span>')
+    .replace(/\[猜测\]/g,'<span class="tag g">猜测</span>');
+  const inline = s => tag(esc(s))
+    .replace(/`([^`]+)`/g,'<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
+
+  const out = []; const L = t.split("\n"); let i = 0;
+  while (i < L.length){
+    const l = L[i];
+    if (/^```/.test(l)){
+      const buf=[]; i++;
+      while (i<L.length && !/^```/.test(L[i])) buf.push(L[i++]);
+      i++; out.push("<pre><code>"+esc(buf.join("\n"))+"</code></pre>"); continue;
+    }
+    if (/^\|/.test(l) && i+1<L.length && /^\|[\s:|-]+\|?$/.test(L[i+1])){
+      const cells = r => r.replace(/^\||\|$/g,"").split("|").map(c=>c.trim());
+      const head = cells(l); i += 2;
+      const rows = [];
+      while (i<L.length && /^\|/.test(L[i])) rows.push(cells(L[i++]));
+      out.push("<table><tr>"+head.map(h=>"<th>"+inline(h)+"</th>").join("")+"</tr>"
+        + rows.map(r=>"<tr>"+r.map(c=>"<td>"+inline(c)+"</td>").join("")+"</tr>").join("")+"</table>");
+      continue;
+    }
+    if (/^###\s+/.test(l)) out.push("<h3>"+inline(l.slice(4))+"</h3>");
+    else if (/^##\s+/.test(l)) out.push("<h2>"+inline(l.slice(3))+"</h2>");
+    else if (/^#\s+/.test(l)) out.push("<h1>"+inline(l.slice(2))+"</h1>");
+    else if (/^>\s?/.test(l)) out.push("<blockquote>"+inline(l.replace(/^>\s?/,""))+"</blockquote>");
+    else if (/^\s*[-*]\s+/.test(l)) out.push("<li>"+inline(l.replace(/^\s*[-*]\s+/,""))+"</li>");
+    else if (/^\s*\d+\.\s+/.test(l)) out.push("<li>"+inline(l.replace(/^\s*\d+\.\s+/,""))+"</li>");
+    else if (/^---+$/.test(l)) out.push("<hr>");
+    else if (l.trim()==="") out.push("");
+    else out.push("<p>"+inline(l)+"</p>");
+    i++;
+  }
+  return out.join("\n");
+}
+
+/* ── 底：轮到你了 ── */
+function drawAsk(){
+  const box = $("#ask");
+
+  if (ASK && ASK["有题"]){
+    const opts = (ASK["选项"]||[]).map(o =>
+      `<button class="opt" data-ans="${esc(o["字母"])}">`
+      + `<span class="k">${esc(o["字母"])}</span><span>${esc(o["说的是"])}</span></button>`).join("");
+    box.innerHTML =
+      `<div class="cap">轮到你了<b>第 ${ASK["第几题"]} 题，共 ${ASK["共"]} 题　·　第 ${ASK["轮次"]} 轮</b></div>`
+      + `<div class="q">${esc(ASK["题面"]||"（这一题没有题面，看右边文档）")}</div>`
+      + `<div class="opts">${opts}`
+      + `<button class="opt dunno" data-ans="这个我答不上来">这个我答不上来</button></div>`
+      + `<div class="freewrap"><input id="free" placeholder="或者用自己的话说（比自选项更准）">`
+      + `<button class="send" id="btnFree">回它</button></div>`
+      + `<div class="note">答完最后一题它会重听一轮，那一次要花钱 ~$0.1–0.4。`
+      + `答不上来也是有用的信息，别硬编。</div>`;
+    box.querySelectorAll(".opt").forEach(b => b.onclick = () => answer(b.dataset.ans));
+    $("#btnFree").onclick = () => { const v = $("#free").value.trim(); if (v) answer(v); };
+    $("#free").onkeydown = e => { if (e.key==="Enter"){ const v=e.target.value.trim(); if(v) answer(v); } };
+    setBusy(busy);
+    return;
+  }
+
+  // 没题：给几个能点的下一步
+  const started = S && S.started;
+  const acts = [];
+  if (!started){
+    box.innerHTML =
+      `<div class="cap">从这儿开始</div>`
+      + `<div class="freewrap"><input id="free" placeholder="随口说一句你的想法，越乱越好">`
+      + `<button class="send" id="btnFree">开始</button></div>`
+      + `<div class="note">别整理。犹豫的地方、"顺便还能…"、"老是…" —— 这些恰恰是它要吃的东西。`
+      + `<br>第一步花 ~$0.1–0.4。</div>`;
+    $("#btnFree").onclick = () => { const v=$("#free").value.trim(); if(v) run("start",[v]); };
+    $("#free").onkeydown = e => { if(e.key==="Enter"){ const v=e.target.value.trim(); if(v) run("start",[v]); } };
+    setBusy(busy);
+    return;
+  }
+  acts.push(['go',[],'往下走一步','~$0.1–0.5','go']);
+  acts.push(['status',[],'现在到哪了','不花钱','']);
+  acts.push(['explain',[],'用大白话讲一遍','~$0.1–0.3','']);
+  acts.push(['日报',[],'今天该干什么','~$0.1–0.3','']);
+  acts.push(['cost',[],'钱花在哪了','不花钱','']);
+  box.innerHTML = `<div class="cap">没有要你答的题　<b>下一步你可以</b></div><div class="acts">`
+    + acts.map(([c,a,t,cost,cls]) =>
+        `<button class="act ${cls}" data-c="${c}">${t}<span class="c">${cost}</span></button>`).join("")
+    + `</div><div class="note">「上线」「结项」「reset」这些不可逆的，故意没放在这儿 —— `
+    + `值得你专门去终端敲一次。</div>`;
+  box.querySelectorAll(".act").forEach(b => b.onclick = () => run(b.dataset.c, []));
+  setBusy(busy);
+}
+
+function setBusy(b){
+  document.querySelectorAll(".ask button").forEach(x => x.disabled = b);
+  const inp = $("#free"); if (inp) inp.disabled = b;
+  $("#btnStop").disabled = !b;
+}
+
+async function answer(v){ await run("答", [v]); }
+
+async function run(cmd, args){
+  if (busy) return;
+  busy = true; setBusy(true); logFrom = 0; $("#log").textContent = "";
+  const r = await api("/api/run", {cmd, args});
+  if (r.error){
+    busy = false; setBusy(false);
+    $("#log").textContent = "跑不了：" + r.error;
+  }
+}
+
+$("#btnStop").onclick = async () => { await api("/api/stop", {}); };
+
+/* ── 轮询 ── */
+async function tick(){
+  try{
+    const d = await api("/api/state?token=" + TOKEN);
+    if (!d.error){
+      S = d; drawMoney(); drawSteps(); drawTabs();
+      if (!pinned){
+        const now = (S.steps||[]).find(s => s.state==="now" && s.doc && s.has_doc)
+                 || [...(S.steps||[])].reverse().find(s => s.has_doc);
+        if (now && now.doc !== curDoc) openDoc(now.doc);
+      }
+      const j = d.job;
+      const wasBusy = busy;
+      busy = !!(j && j.running);
+      $("#jobPill").className = "pill" + (busy ? " live" : "");
+      $("#jobPill").textContent = busy ? (j.cmd + "　" + j.secs + " 秒")
+        : (j ? (j.rc === 0 ? "上一件：" + j.cmd + " 做完了" : "上一件：" + j.cmd + " 没跑成（退出码 " + j.rc + "）") : "空闲");
+      if (wasBusy && !busy) pinned = false;   // 跑完了，自动跳回当前那一步的成果
+    }
+    const a = await api("/api/ask?token=" + TOKEN);
+    const changed = JSON.stringify(a) !== JSON.stringify(ASK);
+    ASK = a;
+    if (changed || !$("#ask").innerHTML) drawAsk(); else setBusy(busy);
+  }catch(e){ /* 面板挂了不影响命令行，这是故意的 */ }
+}
+
+async function tickLog(){
+  if (!busy) return;
+  const j = await api("/api/job?from=" + logFrom + "&token=" + TOKEN);
+  if (j && j.text){
+    const box = $("#log");
+    if (logFrom === 0) box.textContent = "";
+    box.textContent += j.text;
+    logFrom = j.total;
+    box.scrollTop = box.scrollHeight;
+  }
+}
+
+tick(); drawAsk();
+setInterval(tick, 1800);
+setInterval(tickLog, 700);
+</script>
+</body></html>
