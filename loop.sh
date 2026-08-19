@@ -296,6 +296,19 @@ cmd_start() {
   local goal="${1:-}"
   [ -n "$goal" ] || die '用法：./loop.sh start "你想做的事，一句话就行"'
 
+  # 开新想法之前先清场。
+  # 不清的话：上一个项目的 ran_* 还在，新想法一进来第2、3步就是"已完成"，
+  # 而且它们的文档会被当上下文喂给 AI——屏幕上全是 ✓，底下全是别人的材料。
+  if had_run; then
+    local prev; prev="$(head -c 40 "$STATE_DIR/原始想法.txt" 2>/dev/null || echo '上一个想法')"
+    rule
+    warn "这儿有上一次没做完的东西，先挪开再开新的。"
+    say  "  上一个想法：${C_DIM}${prev}${C_OFF}"
+    archive_run || true
+    say  "  挪到了：${C_BOLD}$(basename "$ARCHIVED_TO")${C_OFF}　${C_DIM}一个文件都没删，随时能翻出来。${C_OFF}"
+    rule
+  fi
+
   mkdir -p "$STATE_DIR" "$LOG_DIR" "$DOC_DIR"
   printf '%s\n' "$goal" > "$STATE_DIR/原始想法.txt"
 
@@ -2577,17 +2590,55 @@ cmd_back() {
   say "${C_DIM}（旧的那份文档还在，它会在原来的基础上重做——想彻底重来就先把那个文件删了）${C_OFF}"
 }
 
-cmd_reset() {
-  if [ -d "$STATE_DIR" ] || [ -d "$DOC_DIR" ]; then
-    local bak="$ROOT/.loop-backup-$(date +%Y%m%d-%H%M%S)"
-    mkdir -p "$bak"
-    # 用 mv 不用 cp：docs 必须真的挪走。
-    # 留在原地的旧文档会让后面的步骤以为"这步已经做过了"，直接跳过——等于没重置。
-    [ -d "$STATE_DIR" ] && mv "$STATE_DIR" "$bak/" 2>/dev/null || true
-    [ -d "$DOC_DIR" ]   && mv "$DOC_DIR"   "$bak/" 2>/dev/null || true
-    ok "旧的东西都挪到了 $bak（没删，随时能翻出来）"
+# 上一次跑过东西没有？看状态和产出，不看有没有目录——
+# 空目录到处都是（mkdir -p 建的），有目录不等于跑过。
+had_run() {
+  [ -f "$STATE_DIR/stage" ] && return 0
+  [ -f "$STATE_DIR/原始想法.txt" ] && return 0
+  ls "$DOC_DIR"/0*.md >/dev/null 2>&1 && return 0
+  return 1
+}
+
+# 把上一次的东西整个挪走，一个文件都不删。
+#
+# 为什么必须【挪走】而不是留着：留在原地的旧文档会让后面的步骤
+# 以为"这步已经做过了"直接跳过，而且 run_stage 会把它们当上下文
+# 喂给 AI——于是你分析一个新想法，它手里拿着的是上一个项目的材料。
+# 这个坑 2026-08-19 真出过：.loop/ran_giants=yes ＋ docs/ 里躺着
+# MoneyLoop 自己的竞品调研，任何新想法一进来，第2、3步都是"已完成"。
+#
+# 【钥匙不许跟着挪走】：.loop/接口/ 里是 API key，
+# 换个项目不该让你重配一次钥匙。
+archive_run() {
+  had_run || return 1
+  local tag; tag="$(head -c 24 "$STATE_DIR/原始想法.txt" 2>/dev/null | tr -d '\n/' || true)"
+  local bak="$ROOT/.loop-backup-$(date +%Y%m%d-%H%M%S)${tag:+-$tag}"
+  mkdir -p "$bak"
+
+  # 钥匙先端出来
+  local keys=""
+  if [ -d "$STATE_DIR/接口" ]; then
+    keys="$(mktemp -d)"; cp -r "$STATE_DIR/接口" "$keys/" 2>/dev/null || true
   fi
-  rm -rf "$STATE_DIR"
+
+  [ -d "$STATE_DIR" ] && mv "$STATE_DIR" "$bak/" 2>/dev/null || true
+  [ -d "$DOC_DIR" ]   && mv "$DOC_DIR"   "$bak/" 2>/dev/null || true
+
+  # 钥匙放回去
+  if [ -n "$keys" ] && [ -d "$keys/接口" ]; then
+    mkdir -p "$STATE_DIR"; cp -r "$keys/接口" "$STATE_DIR/" 2>/dev/null || true
+    rm -rf "$keys"
+    say "${C_DIM}接口钥匙留在原处，没跟着挪走。${C_OFF}"
+  fi
+  ARCHIVED_TO="$bak"
+  return 0
+}
+
+cmd_reset() {
+  if archive_run; then
+    ok "旧的东西都挪到了 $ARCHIVED_TO（没删，随时能翻出来）"
+  fi
+  rm -rf "$STATE_DIR/stage" "$STATE_DIR"/ran_* "$STATE_DIR"/signoff_* 2>/dev/null || true
   ok "已重置。跑 ./loop.sh start \"你的想法\" 重新开始。"
 }
 

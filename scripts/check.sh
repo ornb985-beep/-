@@ -240,6 +240,14 @@ if [ -f scripts/test-面板.sh ]; then
   run "面板（白名单真挡住/点了真发生/题真从 lib.sh 读）" bash scripts/test-面板.sh
 fi
 
+# 开新项目要先清场。
+# 2026-08-19 真出过：上一个项目的 ran_* 和 docs/ 还在，新想法一进来
+# 第2、3步就是「已完成」，而且旧文档被当上下文喂给了 AI——
+# 屏幕上全是 ✓，底下全是别人项目的材料。
+if [ -f scripts/test-开新项目.sh ]; then
+  run "开新项目先清场（旧的挪走不删/钥匙留下/从第一步开始）" bash scripts/test-开新项目.sh
+fi
+
 # ---------------- 已知失败区（撞到的真 bug，先记录、不修） ----------------
 if [ -d scripts/known-fail ]; then
   for kf in scripts/known-fail/test-*.sh; do
