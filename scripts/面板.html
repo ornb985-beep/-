@@ -1,844 +1,397 @@
 <!doctype html>
 <html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>MoneyLoop 面板</title>
+<title>MoneyLoop</title>
 <style>
-*{box-sizing:border-box}
+/* ─────────────────────────────────────────────────────────────
+   排版按 借鉴-Manus.md 那五条来：
+   双栏（左过程右成果）· 每步状态标签 · 钱永远可见 · 分歧红绿灯 · 一键回看
+   ───────────────────────────────────────────────────────────── */
+*{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#0d141b; --card:#141f29; --card2:#1b2934; --card3:#22323f;
-  --ink:#e3ebf2; --ink2:#9fb2c0; --ink3:#6b8095;
-  --line:#233343; --blue:#5aa3d8; --ok:#4fb98a; --warn:#d9a05b; --bad:#d4705f; --purple:#9b8ad4;
+  --bg:#0b1014; --panel:#111820; --panel2:#161f29; --line:#1e2a36; --line2:#2a3947;
+  --ink:#e6edf3; --ink2:#93a5b5; --ink3:#5f7385;
+  --blue:#5b9dd9; --ok:#4bb98a; --warn:#d8a45f; --bad:#d46f5e; --gold:#c9a86a;
+  --r:10px;
 }
-html,body{height:100%}
-body{margin:0;background:var(--bg);color:var(--ink);
-  font:15px/1.65 "PingFang SC","Noto Sans SC","Microsoft YaHei",system-ui,sans-serif;
-  display:flex;flex-direction:column;overflow:hidden}
+/* 背景要画在 html 上：body 只画自己那个盒子，页面比屏幕矮的时候
+   下面那一条会露出画布的底色，看着像块黑斑。 */
+html{height:100%;background:#0b1014}
+body{height:100%;min-height:100vh}
+body{
+  background:var(--bg);color:var(--ink);overflow:hidden;
+  font:15px/1.7 "PingFang SC","Hiragino Sans GB","Noto Sans SC","Microsoft YaHei",system-ui,-apple-system,sans-serif;
+  display:flex;flex-direction:column;-webkit-font-smoothing:antialiased;
+}
+button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
+button:disabled{opacity:.38;cursor:not-allowed}
 
-/* ---------- 顶栏 ---------- */
-.top{display:flex;align-items:center;gap:14px;padding:11px 18px;border-bottom:1px solid var(--line);
-  background:var(--card);flex-shrink:0}
-.top h1{font-size:16px;margin:0;white-space:nowrap}
-.top h1 span{color:var(--blue)}
-.idea{color:var(--ink2);font-size:13px;flex:1;min-width:0;overflow:hidden;
-  text-overflow:ellipsis;white-space:nowrap}
-.pill{font-size:12px;padding:3px 10px;border-radius:20px;background:var(--card2);
-  color:var(--ink2);white-space:nowrap;border:1px solid var(--line)}
-.pill.hot{background:#3a2320;color:var(--warn);border-color:#5c3a2a}
-.pill.run{background:#12293a;color:var(--blue);border-color:#2a5170}
-.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--blue);
-  margin-right:6px;animation:bl 1s infinite}
+/* ── 顶栏：钱永远在这儿 ── */
+.top{display:flex;align-items:center;gap:18px;padding:12px 22px;
+  background:var(--panel);border-bottom:1px solid var(--line);flex:0 0 auto}
+.brand{font-size:15px;letter-spacing:.14em;color:var(--gold);font-weight:500;white-space:nowrap}
+.money{display:flex;align-items:center;gap:10px;min-width:280px}
+.bar{flex:1;height:5px;border-radius:3px;background:var(--line2);overflow:hidden;min-width:90px}
+.bar i{display:block;height:100%;background:var(--ok);transition:width .5s ease,background .3s}
+.bar.hot i{background:var(--warn)} .bar.over i{background:var(--bad)}
+.money b{font-weight:600;font-variant-numeric:tabular-nums}
+.money small{color:var(--ink3)}
+.spacer{flex:1}
+.pill{padding:4px 11px;border:1px solid var(--line2);border-radius:20px;
+  font-size:12.5px;color:var(--ink2);white-space:nowrap}
+.pill.live{border-color:#2f5f45;color:var(--ok)}
+.pill.live::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;
+  background:var(--ok);margin-right:6px;vertical-align:1px;animation:bl 1.4s infinite}
 @keyframes bl{50%{opacity:.25}}
+.stop{padding:5px 15px;border:1px solid #5a3630;border-radius:7px;color:#e8917f;font-size:13.5px}
+.stop:not(:disabled):hover{background:#2a1a17}
 
-/* ---------- 主体 ---------- */
-.main{flex:1;display:flex;min-height:0}
-.side{width:222px;flex-shrink:0;border-right:1px solid var(--line);overflow-y:auto;
-  padding:12px 10px;background:#101922}
-.sec{font-size:11px;color:var(--ink3);letter-spacing:.08em;margin:14px 6px 7px}
-.sec:first-child{margin-top:0}
-.nav{display:block;width:100%;text-align:left;background:none;border:0;color:var(--ink2);
-  padding:7px 10px;border-radius:7px;cursor:pointer;font-size:13.5px;font-family:inherit;
-  display:flex;align-items:center;gap:8px}
-.nav:hover{background:var(--card2);color:var(--ink)}
-.nav.on{background:var(--card3);color:var(--ink);font-weight:600}
-.nav i{font-style:normal;font-size:11px;width:17px;height:17px;line-height:17px;text-align:center;
-  border-radius:50%;background:var(--line);color:var(--ink3);flex-shrink:0}
-.nav.done i{background:#1e4736;color:var(--ok)} .nav.done{color:var(--ink2)}
-.nav.now i{background:var(--blue);color:#08121a} .nav.now{color:var(--ink);font-weight:600}
-.nav .gate{margin-left:auto;font-size:10px;color:var(--warn)}
-.nav .badge2{margin-left:auto;font-size:10px;background:var(--line);color:var(--ink3);
-  padding:0 6px;border-radius:9px}
+/* ── 主体：双栏 ── */
+.main{flex:1 1 auto;display:flex;min-height:0}
+.left{width:340px;flex:0 0 340px;border-right:1px solid var(--line);
+  display:flex;flex-direction:column;min-height:0;background:#0e141a}
+.right{flex:1;display:flex;flex-direction:column;min-height:0}
+.hd{padding:11px 18px 9px;font-size:12px;letter-spacing:.1em;color:var(--ink3);
+  border-bottom:1px solid var(--line);flex:0 0 auto}
 
-.body{flex:1;overflow-y:auto;padding:20px 24px}
-.body.wide{max-width:none}
-h2.vh{font-size:19px;margin:0 0 3px}
-p.vs{color:var(--ink3);font-size:13px;margin:0 0 18px}
+/* ── 左：十步 ── */
+.steps{overflow-y:auto;padding:8px 10px;flex:0 0 auto;max-height:46%}
+.step{display:flex;gap:10px;align-items:flex-start;padding:7px 9px;border-radius:8px;
+  font-size:13.5px;line-height:1.5}
+.step .m{width:17px;flex:0 0 17px;text-align:center;color:var(--ink3);font-size:12px}
+.step .t{flex:1;color:var(--ink2)}
+.step .g{font-size:11px;color:var(--ink3);border:1px solid var(--line2);
+  border-radius:4px;padding:0 5px;white-space:nowrap;align-self:center}
+.step.done .m{color:var(--ok)} .step.done .t{color:var(--ink2)}
+.step.now{background:#16222e} .step.now .m{color:var(--blue)}
+.step.now .t{color:var(--ink);font-weight:600}
+.step.stuck .m{color:var(--bad)} .step.stuck .t{color:#e8a094}
+.why{font-size:12px;line-height:1.5;color:#c98c80;margin:-3px 9px 6px 36px;
+  padding:5px 9px;border-left:2px solid #5a3630;background:#1a1210;border-radius:0 6px 6px 0}
 
-.card{background:var(--card);border:1px solid var(--line);border-radius:10px;
-  padding:16px 18px;margin-bottom:14px}
-.card h3{font-size:13px;margin:0 0 12px;color:var(--ink3);letter-spacing:.05em;font-weight:600}
-.card.hi{border-color:#2a5170;background:#101f2c}
-.card.gate{border-color:#5c3a2a;background:#1d1712}
+/* ── 左下：过程日志 ── */
+.logwrap{flex:1;display:flex;flex-direction:column;min-height:0;border-top:1px solid var(--line)}
+.log{flex:1;overflow-y:auto;padding:10px 16px 18px;
+  font:12.5px/1.65 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  color:var(--ink2);white-space:pre-wrap;word-break:break-word}
+.log .empty{color:var(--ink3);font-family:inherit;font-size:13px}
 
-/* ---------- 按钮 ---------- */
-.btn{background:var(--card3);color:var(--ink);border:1px solid var(--line);border-radius:8px;
-  padding:9px 15px;font-size:14px;cursor:pointer;font-family:inherit;line-height:1.3}
-.btn:hover:not(:disabled){background:#2c3f4f}
-.btn:disabled{opacity:.4;cursor:not-allowed}
-.btn.pri{background:var(--blue);color:#08121a;border-color:var(--blue);font-weight:600}
-.btn.pri:hover:not(:disabled){background:#6fb3e4}
-.btn.warn{background:var(--warn);color:#1d1207;border-color:var(--warn);font-weight:600}
-.btn.warn:hover:not(:disabled){background:#e5b374}
-.btn.ghost{background:none}
-.btn.sm{padding:5px 10px;font-size:12.5px}
-.btn.danger{color:var(--bad);border-color:#4a2a26}
-.row{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
-.bwrap{display:inline-flex;flex-direction:column;gap:3px}
-.bwrap small{color:var(--ink3);font-size:11.5px;padding-left:2px}
-
-input,textarea,select{background:var(--card2);border:1px solid var(--line);color:var(--ink);
-  border-radius:8px;padding:9px 12px;font:14px/1.5 inherit;font-family:inherit;width:100%}
-input:focus,textarea:focus,select:focus{outline:0;border-color:var(--blue)}
-textarea{resize:vertical;min-height:74px}
-label{display:block;font-size:12.5px;color:var(--ink3);margin:0 0 5px}
-.fld{margin-bottom:12px}
-
-/* ---------- 人 ---------- */
-.people{display:grid;grid-template-columns:repeat(auto-fill,minmax(252px,1fr));gap:10px}
-.p{background:var(--card2);border-radius:9px;padding:11px 13px;border-left:2px solid var(--line)}
-.p.adv{border-left-color:var(--blue)} .p.exe{border-left-color:var(--warn)}
-.p.dis{border-left-color:var(--purple)} .p.arc{opacity:.5}
-.ph{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:2px}
-.ph b{font-size:14px}
-.po{font-size:11.5px;color:var(--ink3);line-height:1.45;margin-bottom:8px}
-.tag{font-size:10px;padding:1px 6px;border-radius:3px;background:var(--line);color:var(--ink3)}
-.tag.pv{background:#173a2c;color:var(--ok);font-weight:600}
-.tag.mdl{background:#2a2340;color:var(--purple)}
-.tag.n{margin-left:auto;background:var(--line);color:var(--ink3)}
-
-/* ---------- 表 ---------- */
-table{width:100%;border-collapse:collapse;font-size:13px}
-th{text-align:left;font-size:11.5px;color:var(--ink3);font-weight:600;padding:0 7px 7px;
-  border-bottom:1px solid var(--line)}
-td{padding:8px 7px;border-bottom:1px solid var(--line);vertical-align:middle}
-tr:last-child td{border-bottom:0}
-.num{font-variant-numeric:tabular-nums;color:var(--ink3);white-space:nowrap}
-.dim{color:var(--ink3)}
-.badge{font-size:11px;padding:1px 7px;border-radius:3px;white-space:nowrap}
-.bok{background:#16362a;color:var(--ok)} .bno{background:#3a2320;color:var(--bad)}
-.brun{background:#1d3547;color:var(--blue)}
-.bar{width:78px} .bar i{display:block;height:6px;background:var(--blue);border-radius:3px}
-
-/* ---------- 群聊 ---------- */
-.msg{border-bottom:1px solid var(--line);padding:12px 0}
-.msg:last-child{border:0}
-.mh{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px}
-.mh b{font-size:13px;color:var(--blue)} .mh time{font-size:11px;color:var(--ink3)}
-.msg.me .mh b{color:var(--ok)} .msg.ceo .mh b{color:var(--warn)} .msg.sys .mh b{color:var(--ink3)}
-.mb{font-size:13.5px;color:var(--ink2);white-space:pre-wrap;word-break:break-word;
-  max-height:270px;overflow:auto}
-
-/* ---------- 文档 ---------- */
-.doc{font-size:14px;line-height:1.8;color:var(--ink2)}
-.doc h1{font-size:19px;color:var(--ink);margin:20px 0 9px;padding-bottom:7px;border-bottom:1px solid var(--line)}
-.doc h2{font-size:16.5px;color:var(--ink);margin:20px 0 8px}
-.doc h3{font-size:14.5px;color:var(--ink);margin:16px 0 6px;letter-spacing:0}
-.doc p{margin:9px 0} .doc ul,.doc ol{margin:9px 0;padding-left:22px} .doc li{margin:4px 0}
-.doc strong{color:var(--ink)}
-.doc code{background:var(--card2);padding:1px 6px;border-radius:4px;font-size:12.5px;color:var(--warn)}
-.doc pre{background:var(--card2);padding:12px;border-radius:8px;overflow:auto;font-size:12.5px}
+/* ── 右：成果 ── */
+.tabs{display:flex;gap:4px;padding:8px 16px;border-bottom:1px solid var(--line);
+  overflow-x:auto;flex:0 0 auto}
+.tab{padding:5px 12px;border-radius:7px;font-size:13px;color:var(--ink3);white-space:nowrap}
+.tab:hover{color:var(--ink2);background:var(--panel2)}
+.tab.on{background:var(--panel2);color:var(--ink)}
+.tab.no{opacity:.35}
+.doc{flex:1;overflow-y:auto;padding:26px 40px 60px;max-width:900px;width:100%}
+.doc.empty{display:flex;align-items:center;justify-content:center;color:var(--ink3);font-size:14px}
+.doc h1{font-size:21px;margin:0 0 16px;padding-bottom:12px;border-bottom:1px solid var(--line)}
+.doc h2{font-size:16.5px;margin:26px 0 10px;color:var(--gold)}
+.doc h3{font-size:14.5px;margin:18px 0 7px;color:var(--ink)}
+.doc p{margin:9px 0;color:var(--ink2)}
+.doc li{margin:5px 0 5px 20px;color:var(--ink2)}
+.doc strong{color:var(--ink);font-weight:600}
+.doc code{background:var(--panel2);padding:1px 6px;border-radius:4px;font-size:.9em;color:var(--gold)}
+.doc pre{background:var(--panel);border:1px solid var(--line);border-radius:8px;
+  padding:12px 15px;overflow-x:auto;margin:12px 0;font-size:12.5px}
 .doc pre code{background:none;padding:0;color:var(--ink2)}
-.doc blockquote{border-left:3px solid var(--line);margin:10px 0;padding:2px 0 2px 14px;color:var(--ink3)}
-.doc table{margin:12px 0} .doc td,.doc th{font-size:13px}
-.doc hr{border:0;border-top:1px solid var(--line);margin:18px 0}
-.doc a{color:var(--blue)}
-.docwrap{max-height:64vh;overflow-y:auto}
+.doc table{border-collapse:collapse;margin:14px 0;font-size:13.5px;width:100%}
+.doc th,.doc td{border:1px solid var(--line2);padding:7px 11px;text-align:left}
+.doc th{background:var(--panel2);color:var(--ink)}
+.doc td{color:var(--ink2)}
+.doc blockquote{border-left:3px solid var(--line2);padding-left:14px;margin:12px 0;color:var(--ink3)}
+.doc hr{border:none;border-top:1px solid var(--line);margin:22px 0}
+.tag{font-size:11.5px;padding:1px 6px;border-radius:4px;border:1px solid;white-space:nowrap}
+.tag.f{color:var(--ok);border-color:#2f5f45}
+.tag.r{color:var(--blue);border-color:#2b4a63}
+.tag.g{color:var(--warn);border-color:#5c4526}
 
-/* ---------- 输出栏 ---------- */
-.out{flex-shrink:0;border-top:1px solid var(--line);background:#0a1016;
-  display:flex;flex-direction:column;max-height:46vh}
-.outh{display:flex;align-items:center;gap:10px;padding:7px 16px;font-size:12.5px;
-  color:var(--ink3);cursor:pointer;user-select:none;flex-shrink:0}
-.outh b{color:var(--ink2);font-weight:600}
-.outb{overflow-y:auto;padding:0 16px 14px;font:12.5px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-  white-space:pre-wrap;word-break:break-word;color:var(--ink2)}
-.out.min .outb{display:none}
-.empty{color:var(--ink3);font-size:13px;text-align:center;padding:22px 0}
-.note{font-size:12.5px;color:var(--warn);background:#1d1712;border:1px solid #4a3524;
-  border-radius:8px;padding:10px 13px;margin:12px 0;line-height:1.65}
-.note.info{color:var(--ink2);background:var(--card2);border-color:var(--line)}
-.note b{color:var(--warn)}
-.note.info b{color:var(--ink)}
-.kpi{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:10px;margin-bottom:16px}
-.k{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:12px 14px}
-.k b{display:block;font-size:22px;line-height:1.25;font-variant-numeric:tabular-nums}
-.k span{font-size:12px;color:var(--ink3)}
-.k.ok b{color:var(--ok)} .k.warn b{color:var(--warn)} .k.blue b{color:var(--blue)}
-.prog{height:5px;background:var(--card2);border-radius:3px;margin-top:8px;overflow:hidden}
-.prog i{display:block;height:100%;background:var(--blue)}
-.prog.hot i{background:var(--bad)}
-.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--card3);
-  border:1px solid var(--line);border-radius:9px;padding:11px 18px;font-size:13.5px;z-index:99;
-  box-shadow:0 8px 28px rgba(0,0,0,.5);max-width:80vw}
-.toast.bad{border-color:#5c332c;color:var(--bad)}
+/* ── 底：轮到你了（这一块是整个界面的心脏）── */
+.ask{flex:0 0 auto;border-top:1px solid var(--line2);background:var(--panel);
+  padding:16px 22px 18px;max-height:44vh;overflow-y:auto}
+.ask .cap{font-size:12px;letter-spacing:.12em;color:var(--gold);margin-bottom:9px}
+.ask .cap b{color:var(--ink3);font-weight:400;letter-spacing:0;margin-left:8px}
+.ask .q{font-size:16.5px;line-height:1.6;margin-bottom:14px;font-weight:600}
+.opts{display:flex;flex-wrap:wrap;gap:9px}
+.opt{display:flex;gap:9px;align-items:flex-start;text-align:left;
+  padding:11px 15px;border:1px solid var(--line2);border-radius:9px;
+  background:var(--panel2);font-size:14px;line-height:1.55;
+  flex:1 1 260px;max-width:100%;transition:border-color .15s,background .15s}
+.opt:not(:disabled):hover{border-color:var(--blue);background:#182633}
+.opt .k{color:var(--gold);font-weight:700;flex:0 0 auto}
+.opt.dunno{flex:0 0 auto;color:var(--ink3);background:none}
+.opt.dunno:not(:disabled):hover{border-color:var(--ink3);background:var(--panel2)}
+.freewrap{display:flex;gap:9px;margin-top:11px}
+.freewrap input{flex:1;background:var(--bg);border:1px solid var(--line2);border-radius:8px;
+  padding:10px 14px;color:var(--ink);font:inherit;font-size:14px}
+.freewrap input:focus{outline:none;border-color:var(--blue)}
+.send{padding:10px 20px;border:1px solid var(--line2);border-radius:8px;font-size:14px}
+.send:not(:disabled):hover{border-color:var(--blue)}
+
+/* ── 底：没题的时候，显示可以点的下一步 ── */
+.acts{display:flex;flex-wrap:wrap;gap:9px;align-items:center}
+.act{padding:10px 17px;border:1px solid var(--line2);border-radius:9px;background:var(--panel2);font-size:14px}
+.act:not(:disabled):hover{border-color:var(--blue);background:#182633}
+.act .c{display:block;font-size:11.5px;color:var(--ink3);margin-top:2px}
+.act.go{border-color:#2f5f45;color:#8fd9b8}
+.act.go:not(:disabled):hover{background:#15271f;border-color:var(--ok)}
+.note{font-size:12.5px;color:var(--ink3);margin-top:11px}
+
+@media (max-width:900px){
+  .main{flex-direction:column}
+  .left{width:auto;flex:0 0 auto;max-height:42%;border-right:none;border-bottom:1px solid var(--line)}
+  .doc{padding:18px 20px 40px}
+}
 </style></head>
 <body>
 
 <div class="top">
-  <h1>Money<span>Loop</span></h1>
-  <div class="idea" id="idea">读取中…</div>
-  <div class="pill" id="pBud">—</div>
-  <div class="pill" id="pJob" style="display:none"></div>
-  <button class="btn sm ghost" id="btnStop" style="display:none">停下</button>
+  <div class="brand">MoneyLoop</div>
+  <div class="money" id="money"></div>
+  <div class="spacer"></div>
+  <div class="pill" id="jobPill">空闲</div>
+  <button class="stop" id="btnStop" disabled>停</button>
 </div>
 
 <div class="main">
-  <div class="side" id="side"></div>
-  <div class="body" id="view"><p class="empty">读取中…</p></div>
+  <div class="left">
+    <div class="hd">现在在干什么</div>
+    <div class="steps" id="steps"></div>
+    <div class="logwrap">
+      <div class="hd">过程</div>
+      <div class="log" id="log"><span class="empty">还没跑过东西。</span></div>
+    </div>
+  </div>
+  <div class="right">
+    <div class="tabs" id="tabs"></div>
+    <div class="doc empty" id="doc">左边选一步，这里显示它的成果。</div>
+  </div>
 </div>
 
-<div class="out min" id="out">
-  <div class="outh" id="outh">
-    <b>运行输出</b><span id="outMeta">还没跑过</span>
-    <span style="margin-left:auto" id="outTog">展开 ▲</span>
-  </div>
-  <div class="outb" id="outb"></div>
-</div>
+<div class="ask" id="ask"></div>
 
 <script>
 const TOKEN = "__TOKEN__";
-let S = null;          // 最新状态
-let VIEW = "flow";     // 当前在看哪一页
-let POLL = null;       // 输出轮询
-let OUTLEN = 0;
+let S = null, ASK = null, curDoc = null, logFrom = 0, busy = false, pinned = false;
 
 const $ = s => document.querySelector(s);
-const esc = s => (s==null?"":String(s)).replace(/[&<>"]/g, c =>
-  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const esc = s => (s||"").replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
-function toast(msg, bad){
-  const d = document.createElement("div");
-  d.className = "toast" + (bad ? " bad" : "");
-  d.textContent = msg;
-  document.body.appendChild(d);
-  setTimeout(()=>d.remove(), bad ? 6500 : 3200);
+async function api(path, body){
+  const o = {headers:{"X-Token":TOKEN,"Content-Type":"application/json"}};
+  if (body){ o.method="POST"; o.body=JSON.stringify(body); }
+  const r = await fetch(path, o);
+  return r.json().catch(()=>({error:"服务端没给回话"}));
 }
 
-async function api(path, opt){
-  opt = opt || {};
-  opt.headers = Object.assign({"X-Token":TOKEN,"Content-Type":"application/json"}, opt.headers||{});
-  const r = await fetch(path, opt);
-  const j = await r.json().catch(()=>({error:"服务器没回话"}));
-  if(!r.ok) throw new Error(j.error || ("出错了 "+r.status));
-  return j;
-}
-
-// ---------- 跑一条命令 ----------
-async function run(cmd, args, quiet){
-  try{
-    await api("/api/run", {method:"POST", body:JSON.stringify({cmd:cmd, args:args||[]})});
-    OUTLEN = 0;
-    $("#outb").textContent = "";
-    $("#out").classList.remove("min");
-    $("#outTog").textContent = "收起 ▼";
-    startPoll();
-    if(!quiet) toast("开跑：" + cmd);
-  }catch(e){ toast(e.message, true); }
-}
-
-function startPoll(){
-  if(POLL) clearInterval(POLL);
-  POLL = setInterval(pollJob, 700);
-  pollJob();
-}
-
-async function pollJob(){
-  let j;
-  try{ j = await api("/api/job?from=" + OUTLEN); }catch(e){ return; }
-  if(j.text){
-    OUTLEN = j.total;
-    const b = $("#outb");
-    const stuck = b.scrollTop + b.clientHeight >= b.scrollHeight - 40;
-    b.textContent += j.text;
-    if(stuck) b.scrollTop = b.scrollHeight;
+/* ── 钱：永远可见 ── */
+function drawMoney(){
+  const spent = +(S.spent||0), bud = parseFloat(S.budget||"");
+  if (!bud){
+    $("#money").innerHTML = `<b>已花 $${spent.toFixed(2)}</b><small>没设上限</small>`;
+    return;
   }
-  $("#outMeta").textContent = j.cmd
-    ? (j.running ? "正在跑 " + j.cmd + "（" + j.secs + " 秒）" : j.cmd + " · 用了 " + j.secs + " 秒")
-    : "还没跑过";
-  const pj = $("#pJob"), bs = $("#btnStop");
-  if(j.running){
-    pj.style.display=""; pj.className="pill run";
-    pj.innerHTML = '<span class="dot"></span>' + esc(j.cmd);
-    bs.style.display="";
-  }else{
-    pj.style.display="none"; bs.style.display="none";
-    if(POLL){ clearInterval(POLL); POLL=null; }
-    refresh();
-    if(j.rc !== null && j.rc !== 0 && j.rc !== undefined){
-      // 退出码 2 是"该你了"，不是坏了——这是这套东西特意区分开的
-      if(j.rc === 2) toast("停下来了，轮到你做点什么。看下面的输出。");
-      else toast("这条没跑成（退出码 " + j.rc + "），看下面的输出。", true);
-    }
-  }
+  const pct = Math.min(100, spent/bud*100);
+  const cls = pct>=100 ? "over" : pct>=70 ? "hot" : "";
+  $("#money").innerHTML =
+    `<b>$${spent.toFixed(2)}</b><small>／ $${bud}</small>` +
+    `<span class="bar ${cls}"><i style="width:${pct}%"></i></span>` +
+    `<small>还剩 $${Math.max(0,bud-spent).toFixed(2)}</small>`;
 }
 
-$("#btnStop").onclick = async e => {
-  e.stopPropagation();
-  await api("/api/stop", {method:"POST", body:"{}"});
-  toast("已叫停。");
-};
-$("#outh").onclick = () => {
-  const o = $("#out"); o.classList.toggle("min");
-  $("#outTog").textContent = o.classList.contains("min") ? "展开 ▲" : "收起 ▼";
-};
+/* ── 左：十步 ── */
+function drawSteps(){
+  const st = (S.steps||[]).filter(s => s.key !== "done");
+  $("#steps").innerHTML = st.map(s => {
+    // 「跑过了但该产出的文件不在」＝卡住了，不是做完了（第 6 条）
+    const stuck = s.state==="now" && s.ran && s.doc && !s.has_doc;
+    const cls = stuck ? "stuck" : s.state;
+    const mark = stuck ? "!" : s.state==="done" ? "✓" : s.state==="now" ? "▸" : "·";
+    const gate = s.signoff && !s.signed
+      ? `<span class="g">${s.state==="now" ? "等你拍板" : "要你拍板"}</span>` : "";
+    return `<div class="step ${cls}" data-doc="${esc(s.doc||"")}">`
+      + `<span class="m">${mark}</span><span class="t">${s.n+1}　${esc(s.label)}</span>${gate}</div>`
+      + (stuck ? `<div class="why">跑过了，但 ${esc(s.doc)} 没出来 —— 按「没做成」算</div>` : "");
+  }).join("");
+  document.querySelectorAll(".step[data-doc]").forEach(el => {
+    const d = el.dataset.doc;
+    if (d) el.onclick = () => { pinned = true; openDoc(d); };
+  });
+}
 
-// ---------- 极简 markdown ----------
+/* ── 右：成果 ── */
+function drawTabs(){
+  const st = (S.steps||[]).filter(s => s.doc);
+  $("#tabs").innerHTML = st.map(s =>
+    `<button class="tab ${s.doc===curDoc?"on":""} ${s.has_doc?"":"no"}" data-doc="${esc(s.doc)}">`
+    + `${esc(s.label)}</button>`).join("");
+  document.querySelectorAll(".tab").forEach(b =>
+    b.onclick = () => { pinned = true; openDoc(b.dataset.doc); });
+}
+
+async function openDoc(name){
+  if (!name) return;
+  curDoc = name; drawTabs();
+  const r = await api("/api/doc?name=" + encodeURIComponent(name) + "&token=" + TOKEN);
+  const box = $("#doc");
+  if (!r.text){ box.className="doc empty"; box.textContent = "这一步还没有产出。"; return; }
+  box.className = "doc"; box.innerHTML = md(r.text); box.scrollTop = 0;
+}
+
+/* markdown → html。只认这套东西真会用到的那几种，够用就行 */
 function md(t){
-  if(!t) return '<p class="empty">这份还没有内容。</p>';
-  const lines = t.split("\n");
-  let h="", inCode=false, list=null, tbl=null;
-  const close = () => { if(list){h+="</"+list+">";list=null;}
-                        if(tbl){h+="</tbody></table>";tbl=null;} };
-  const inl = s => esc(s)
-    .replace(/`([^`]+)`/g,"<code>$1</code>")
-    .replace(/\*\*([^*]+)\*\*/g,"<strong>$1</strong>")
-    .replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
-  for(let raw of lines){
-    if(/^```/.test(raw)){
-      if(inCode){h+="</code></pre>";inCode=false;} else {close();h+="<pre><code>";inCode=true;}
+  const tag = s => s
+    .replace(/\[事实\]/g,'<span class="tag f">事实</span>')
+    .replace(/\[推断\]/g,'<span class="tag r">推断</span>')
+    .replace(/\[猜测\]/g,'<span class="tag g">猜测</span>');
+  const inline = s => tag(esc(s))
+    .replace(/`([^`]+)`/g,'<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>');
+
+  const out = []; const L = t.split("\n"); let i = 0;
+  while (i < L.length){
+    const l = L[i];
+    if (/^```/.test(l)){
+      const buf=[]; i++;
+      while (i<L.length && !/^```/.test(L[i])) buf.push(L[i++]);
+      i++; out.push("<pre><code>"+esc(buf.join("\n"))+"</code></pre>"); continue;
+    }
+    if (/^\|/.test(l) && i+1<L.length && /^\|[\s:|-]+\|?$/.test(L[i+1])){
+      const cells = r => r.replace(/^\||\|$/g,"").split("|").map(c=>c.trim());
+      const head = cells(l); i += 2;
+      const rows = [];
+      while (i<L.length && /^\|/.test(L[i])) rows.push(cells(L[i++]));
+      out.push("<table><tr>"+head.map(h=>"<th>"+inline(h)+"</th>").join("")+"</tr>"
+        + rows.map(r=>"<tr>"+r.map(c=>"<td>"+inline(c)+"</td>").join("")+"</tr>").join("")+"</table>");
       continue;
     }
-    if(inCode){ h += esc(raw)+"\n"; continue; }
-    const l = raw.trimEnd();
-    if(!l.trim()){ close(); continue; }
-    let m;
-    if((m=l.match(/^(#{1,4})\s+(.*)$/))){ close(); const n=Math.min(m[1].length,3);
-      h+="<h"+n+">"+inl(m[2])+"</h"+n+">"; continue; }
-    if(/^([-*_])\1{2,}$/.test(l.trim())){ close(); h+="<hr>"; continue; }
-    if(/^\|/.test(l)){
-      const cells = l.split("|").slice(1,-1).map(c=>c.trim());
-      if(/^\|[\s:|-]+\|$/.test(l)) continue;           // 分隔行
-      if(!tbl){ close(); tbl=1;
-        h+="<table><thead><tr>"+cells.map(c=>"<th>"+inl(c)+"</th>").join("")+"</tr></thead><tbody>";
-        continue; }
-      h+="<tr>"+cells.map(c=>"<td>"+inl(c)+"</td>").join("")+"</tr>"; continue;
+    if (/^###\s+/.test(l)) out.push("<h3>"+inline(l.slice(4))+"</h3>");
+    else if (/^##\s+/.test(l)) out.push("<h2>"+inline(l.slice(3))+"</h2>");
+    else if (/^#\s+/.test(l)) out.push("<h1>"+inline(l.slice(2))+"</h1>");
+    else if (/^>\s?/.test(l)) out.push("<blockquote>"+inline(l.replace(/^>\s?/,""))+"</blockquote>");
+    else if (/^\s*[-*]\s+/.test(l)) out.push("<li>"+inline(l.replace(/^\s*[-*]\s+/,""))+"</li>");
+    else if (/^\s*\d+\.\s+/.test(l)) out.push("<li>"+inline(l.replace(/^\s*\d+\.\s+/,""))+"</li>");
+    else if (/^---+$/.test(l)) out.push("<hr>");
+    else if (l.trim()==="") out.push("");
+    else out.push("<p>"+inline(l)+"</p>");
+    i++;
+  }
+  return out.join("\n");
+}
+
+/* ── 底：轮到你了 ── */
+function drawAsk(){
+  const box = $("#ask");
+
+  if (ASK && ASK["有题"]){
+    const opts = (ASK["选项"]||[]).map(o =>
+      `<button class="opt" data-ans="${esc(o["字母"])}">`
+      + `<span class="k">${esc(o["字母"])}</span><span>${esc(o["说的是"])}</span></button>`).join("");
+    box.innerHTML =
+      `<div class="cap">轮到你了<b>第 ${ASK["第几题"]} 题，共 ${ASK["共"]} 题　·　第 ${ASK["轮次"]} 轮</b></div>`
+      + `<div class="q">${esc(ASK["题面"]||"（这一题没有题面，看右边文档）")}</div>`
+      + `<div class="opts">${opts}`
+      + `<button class="opt dunno" data-ans="这个我答不上来">这个我答不上来</button></div>`
+      + `<div class="freewrap"><input id="free" placeholder="或者用自己的话说（比自选项更准）">`
+      + `<button class="send" id="btnFree">回它</button></div>`
+      + `<div class="note">答完最后一题它会重听一轮，那一次要花钱 ~$0.1–0.4。`
+      + `答不上来也是有用的信息，别硬编。</div>`;
+    box.querySelectorAll(".opt").forEach(b => b.onclick = () => answer(b.dataset.ans));
+    $("#btnFree").onclick = () => { const v = $("#free").value.trim(); if (v) answer(v); };
+    $("#free").onkeydown = e => { if (e.key==="Enter"){ const v=e.target.value.trim(); if(v) answer(v); } };
+    setBusy(busy);
+    return;
+  }
+
+  // 没题：给几个能点的下一步
+  const started = S && S.started;
+  const acts = [];
+  if (!started){
+    box.innerHTML =
+      `<div class="cap">从这儿开始</div>`
+      + `<div class="freewrap"><input id="free" placeholder="随口说一句你的想法，越乱越好">`
+      + `<button class="send" id="btnFree">开始</button></div>`
+      + `<div class="note">别整理。犹豫的地方、"顺便还能…"、"老是…" —— 这些恰恰是它要吃的东西。`
+      + `<br>第一步花 ~$0.1–0.4。</div>`;
+    $("#btnFree").onclick = () => { const v=$("#free").value.trim(); if(v) run("start",[v]); };
+    $("#free").onkeydown = e => { if(e.key==="Enter"){ const v=e.target.value.trim(); if(v) run("start",[v]); } };
+    setBusy(busy);
+    return;
+  }
+  acts.push(['go',[],'往下走一步','~$0.1–0.5','go']);
+  acts.push(['status',[],'现在到哪了','不花钱','']);
+  acts.push(['explain',[],'用大白话讲一遍','~$0.1–0.3','']);
+  acts.push(['日报',[],'今天该干什么','~$0.1–0.3','']);
+  acts.push(['cost',[],'钱花在哪了','不花钱','']);
+  box.innerHTML = `<div class="cap">没有要你答的题　<b>下一步你可以</b></div><div class="acts">`
+    + acts.map(([c,a,t,cost,cls]) =>
+        `<button class="act ${cls}" data-c="${c}">${t}<span class="c">${cost}</span></button>`).join("")
+    + `</div><div class="note">「上线」「结项」「reset」这些不可逆的，故意没放在这儿 —— `
+    + `值得你专门去终端敲一次。</div>`;
+  box.querySelectorAll(".act").forEach(b => b.onclick = () => run(b.dataset.c, []));
+  setBusy(busy);
+}
+
+function setBusy(b){
+  document.querySelectorAll(".ask button").forEach(x => x.disabled = b);
+  const inp = $("#free"); if (inp) inp.disabled = b;
+  $("#btnStop").disabled = !b;
+}
+
+async function answer(v){ await run("答", [v]); }
+
+async function run(cmd, args){
+  if (busy) return;
+  busy = true; setBusy(true); logFrom = 0; $("#log").textContent = "";
+  const r = await api("/api/run", {cmd, args});
+  if (r.error){
+    busy = false; setBusy(false);
+    $("#log").textContent = "跑不了：" + r.error;
+  }
+}
+
+$("#btnStop").onclick = async () => { await api("/api/stop", {}); };
+
+/* ── 轮询 ── */
+async function tick(){
+  try{
+    const d = await api("/api/state?token=" + TOKEN);
+    if (!d.error){
+      S = d; drawMoney(); drawSteps(); drawTabs();
+      if (!pinned){
+        const now = (S.steps||[]).find(s => s.state==="now" && s.doc && s.has_doc)
+                 || [...(S.steps||[])].reverse().find(s => s.has_doc);
+        if (now && now.doc !== curDoc) openDoc(now.doc);
+      }
+      const j = d.job;
+      const wasBusy = busy;
+      busy = !!(j && j.running);
+      $("#jobPill").className = "pill" + (busy ? " live" : "");
+      $("#jobPill").textContent = busy ? (j.cmd + "　" + j.secs + " 秒")
+        : (j ? (j.rc === 0 ? "上一件：" + j.cmd + " 做完了" : "上一件：" + j.cmd + " 没跑成（退出码 " + j.rc + "）") : "空闲");
+      if (wasBusy && !busy) pinned = false;   // 跑完了，自动跳回当前那一步的成果
     }
-    if(tbl){ h+="</tbody></table>"; tbl=null; }
-    if((m=l.match(/^\s*[-*]\s+(.*)$/))){
-      if(list!=="ul"){ close(); h+="<ul>"; list="ul"; }
-      h+="<li>"+inl(m[1])+"</li>"; continue; }
-    if((m=l.match(/^\s*\d+\.\s+(.*)$/))){
-      if(list!=="ol"){ close(); h+="<ol>"; list="ol"; }
-      h+="<li>"+inl(m[1])+"</li>"; continue; }
-    if((m=l.match(/^>\s?(.*)$/))){ close(); h+="<blockquote>"+inl(m[1])+"</blockquote>"; continue; }
-    close(); h+="<p>"+inl(l)+"</p>";
-  }
-  close(); if(inCode) h+="</code></pre>";
-  return h;
+    const a = await api("/api/ask?token=" + TOKEN);
+    const changed = JSON.stringify(a) !== JSON.stringify(ASK);
+    ASK = a;
+    if (changed || !$("#ask").innerHTML) drawAsk(); else setBusy(busy);
+  }catch(e){ /* 面板挂了不影响命令行，这是故意的 */ }
 }
 
-// ---------- 侧边栏 ----------
-function drawSide(){
-  const s = S; let h = '<div class="sec">九步流程</div>';
-  s.steps.forEach(st => {
-    if(st.key === "done") return;
-    h += '<button class="nav '+st.state+'" data-v="step:'+st.key+'">'
-       + '<i>'+st.n+'</i>'+esc(st.label)
-       + (st.signoff ? '<span class="gate">你拍板</span>' : '')
-       + '</button>';
-  });
-  const cnt = (n)=> n ? '<span class="badge2">'+n+'</span>' : '';
-  h += '<div class="sec">组织和干活</div>'
-    +  '<button class="nav" data-v="flow">🧭 现在该干什么</button>'
-    +  '<button class="nav" data-v="team">👥 组织'+cnt(s.roles.length)+'</button>'
-    +  '<button class="nav" data-v="chat">💬 群聊'+cnt(s.chat.length)+'</button>'
-    +  '<button class="nav" data-v="work">📋 派活'+cnt(s.tasks.filter(t=>t.state!=="验收过了").length)+'</button>'
-    +  '<button class="nav" data-v="expert">🎓 外部专家</button>'
-    +  '<div class="sec">控制</div>'
-    +  '<button class="nav" data-v="api">🔌 接口（谁用谁家的 AI）</button>'
-    +  '<button class="nav" data-v="money">💰 钱</button>'
-    +  '<button class="nav" data-v="think">🤔 帮我判断 / 纠错</button>';
-  const el = $("#side"); el.innerHTML = h;
-  el.querySelectorAll(".nav").forEach(b => {
-    if(b.dataset.v === VIEW) b.classList.add("on");
-    b.onclick = () => { VIEW = b.dataset.v; draw(); };
-  });
-}
-
-// ---------- 各个页面 ----------
-function busy(){ return S.job && S.job.running; }
-function bdis(){ return busy() ? "disabled" : ""; }
-
-function vFlow(){
-  const s = S, st = s.steps[s.stage_index];
-  if(!s.started || !s.idea){
-    return '<h2 class="vh">先说一句你想做什么</h2>'
-      + '<p class="vs">一句话就行，不用想得多完整。它会带着你把这句话撑开。</p>'
-      + '<div class="card hi"><div class="fld"><label>你的想法</label>'
-      + '<textarea id="fIdea" placeholder="比如：我想做个帮我记客户跟进的小工具"></textarea></div>'
-      + '<div class="row"><button class="btn pri" id="bStart" '+bdis()+'>开始</button>'
-      + '<span class="dim" style="font-size:12.5px">第一步它会问你：给谁用、谁掏钱、要赚多少、倒推算账</span></div></div>'
-      + '<div class="note info"><b>建议先设个花钱上限。</b>这套东西每跑一步都要调用 AI，是花钱的。'
-      + '去左边「💰 钱」里设一个数，到顶会自动停。</div>';
-  }
-
-  let h = '<h2 class="vh">现在该干什么</h2><p class="vs">'
-        + '一直点「继续」就行，到该你拍板的地方它会停下来。</p>';
-
-  h += '<div class="kpi">'
-    + kpi("blue", s.todo_done+"/"+(s.todo_done+s.todo_open), "项目任务做完",
-          pctv(s.todo_done, s.todo_done+s.todo_open))
-    + kpi(s.todo_gate?"warn":"", s.todo_gate, "只有你能干的")
-    + kpi("", s.roles.length, "在岗 · 封存 "+s.archived.length)
-    + kpi(budHot()?"warn":"ok", "$"+moneyText(), "花了 / 上限", budBar())
-    + kpi(s.revisions?"ok":"warn", s.revisions, "标准改过几次")
-    + '</div>';
-
-  if(s.closed){
-    h += '<div class="note"><b>这个项目已经结项了。</b>复盘在 docs/99-结项.md。</div>';
-  }
-
-  const gateNow = st.signoff && st.ran && !st.signed;
-  h += '<div class="card '+(gateNow?"gate":"hi")+'">'
-     + '<h3>第 '+st.n+' 步 · '+esc(st.label)+(st.signoff?'　←　这一步只有你能定':'')+'</h3>';
-
-  if(gateNow){
-    h += '<p style="margin:0 0 6px">它已经把这一步做完了，'
-       + '<b>东西在下面，你看完再决定。</b></p>'
-       + '<p class="dim" style="font-size:13px;margin:0 0 14px">'
-       + '这是生意问题不是技术问题——凭什么是我们、什么算好、砍哪个功能、花多少钱。'
-       + '这些替你定只能靠编。</p>'
-       + '<div class="row">'
-       + '<div class="bwrap"><button class="btn warn" data-run="go" '+bdis()+'>看过了，确认，往下走</button>'
-       + '<small>确认之后进入第 '+(st.n+1)+' 步</small></div>'
-       + '<div class="bwrap"><button class="btn danger" data-run="back" '+bdis()+'>这一步方向就不对，退回重做</button>'
-       + '<small>旧文档还在，它会在原基础上重做</small></div></div>';
-  }else{
-    h += '<div class="row">'
-       + '<div class="bwrap"><button class="btn pri" data-run="go" '+bdis()+'>继续，跑这一步</button>'
-       + '<small>'+(busy()?"正在跑，等它跑完":"跑完会自动停在下一个要你拍板的地方")+'</small></div>'
-       + '<div class="bwrap"><button class="btn" data-run="explain" '+bdis()+'>用大白话讲讲现在什么情况</button>'
-       + '<small>看不懂的时候点这个</small></div>'
-       + '<div class="bwrap"><button class="btn" data-run="auto" '+bdis()+'>无人值守，一路往下跑</button>'
-       + '<small>撞到预算/闸门/卡点会自己停。<b>要先设预算</b></small></div>'
-       + '</div>';
-  }
-  h += '</div>';
-
-  if(st.has_doc){
-    h += '<div class="card"><h3>这一步产出的东西 · '+esc(st.doc)+'</h3>'
-       + '<div class="docwrap doc" id="docBox"><p class="empty">读取中…</p></div></div>';
-    loadDoc(st.doc);
-  }
-  return h;
-}
-
-function vStep(key){
-  const st = S.steps.find(x => x.key === key);
-  if(!st) return '<p class="empty">没有这一步</p>';
-  let h = '<h2 class="vh">第 '+st.n+' 步 · '+esc(st.label)+'</h2>'
-        + '<p class="vs">'
-        + (st.signoff ? "这一步是生意问题，只有你能拍板。" : "这一步它自己能定，不用烦你。")
-        + '　状态：' + (st.state==="done"?"做完了":st.state==="now"?"正在这一步":"还没到")
-        + '</p>';
-  if(st.state === "now"){
-    h += '<div class="row" style="margin-bottom:14px">'
-       + '<button class="btn pri" data-run="go" '+bdis()+'>'
-       + (st.signoff && st.ran && !st.signed ? "确认，往下走" : "跑这一步") + '</button>'
-       + '<button class="btn danger" data-run="back" '+bdis()+'>退回上一步重做</button></div>';
-  }
-  if(st.has_doc){
-    h += '<div class="card"><h3>'+esc(st.doc)+'</h3>'
-       + '<div class="doc" id="docBox"><p class="empty">读取中…</p></div></div>';
-    loadDoc(st.doc);
-  }else if(st.doc){
-    h += '<div class="note info">这一步还没产出 <b>'+esc(st.doc)+'</b>。跑到这一步就有了。</div>';
-  }
-  return h;
-}
-
-async function loadDoc(name){
-  try{
-    const j = await api("/api/doc?name=" + encodeURIComponent(name));
-    const b = $("#docBox"); if(b) b.innerHTML = md(j.text);
-  }catch(e){ const b=$("#docBox"); if(b) b.innerHTML='<p class="empty">读不出来</p>'; }
-}
-
-function person(r, cls){
-  const tags = (r.typ?'<span class="tag">'+esc(r.typ)+'</span>':"")
-    + (r.switched?'<span class="tag pv">'+esc(r.provider)+'</span>':"")
-    + (r.model?'<span class="tag mdl">'+esc(r.model)+'</span>':"")
-    + (r.logs?'<span class="tag n">聊过 '+r.logs+' 次</span>':"");
-  return '<div class="p '+cls+'"><div class="ph"><b>'+esc(r.name)+'</b>'+tags+'</div>'
-    + '<div class="po">'+esc(r.one)+'</div>'
-    + '<div class="row">'
-    + '<button class="btn sm" data-ask="'+esc(r.name)+'" '+bdis()+'>问他</button>'
-    + (r.layer==="执行" ? '<button class="btn sm" data-assign="'+esc(r.name)+'" '+bdis()+'>派活</button>' : "")
-    + '<button class="btn sm ghost" data-arch="'+esc(r.name)+'" '+bdis()+'>封存</button>'
-    + '</div></div>';
-}
-
-function vTeam(){
-  const s = S;
-  const g = l => s.roles.filter(r => r.layer === l);
-  let h = '<h2 class="vh">组织</h2><p class="vs">'
-    + '你 → CEO（唯一拍板的）→ 左边参谋层只出意见，右边执行总监带着人干活。'
-    + '<b>参谋和员工之间没有线，中间必须过 CEO。</b></p>';
-
-  h += '<div class="card hi"><h3>CEO · 不用招，一直在</h3>'
-    + '<div class="row">'
-    + '<div class="bwrap"><button class="btn pri" data-run="ceo" '+bdis()+'>让 CEO 看数、拍板、组队、问责</button>'
-    + '<small>他会看现在的数，判断还到不到得了目标</small></div>'
-    + '<div class="bwrap"><button class="btn" id="bCouncil" '+bdis()+'>开个会诊</button>'
-    + '<small>CEO 自己点名该问谁，逐个问完再综合裁决</small></div>'
-    + '<div class="bwrap"><button class="btn" data-run="today" '+bdis()+'>今天做哪 3 件事</button>'
-    + '<small>顺便看这周到底动了没有</small></div>'
-    + '</div></div>';
-
-  ["参谋","执行","蒸馏"].forEach(l => {
-    const rs = g(l); if(!rs.length && l==="蒸馏") return;
-    const cls = l==="参谋"?"adv":l==="执行"?"exe":"dis";
-    const tip = l==="参谋" ? "只出意见书（证据＋置信度＋反对自己的最强论据），不指挥执行"
-              : l==="执行" ? "按派单干活、交付产物，不改目标"
-              : "从真人的公开材料蒸馏出来的专家，用完可以封存";
-    h += '<div class="card"><h3>'+(l==="参谋"?"左分支 · 参谋层":l==="执行"?"右分支 · 执行层":"蒸馏专家")
-      + '　—　'+tip+'</h3>'
-      + (rs.length ? '<div class="people">'+rs.map(r=>person(r,cls)).join("")+'</div>'
-                   : '<p class="empty">这一层还没人</p>')+'</div>';
-  });
-
-  if(s.archived.length){
-    h += '<div class="card"><h3>已封存（随时起复，没删）</h3><div class="people">'
-      + s.archived.map(r => '<div class="p arc"><div class="ph"><b>'+esc(r.name)+'</b></div>'
-        + '<div class="po">'+esc(r.one)+'</div>'
-        + '<button class="btn sm" data-unarch="'+esc(r.name)+'" '+bdis()+'>起复</button></div>').join("")
-      + '</div></div>';
-  }
-
-  if(s.not_hired.length){
-    h += '<div class="card"><h3>还没招的</h3>'
-      + '<p class="dim" style="font-size:12.5px;margin:0 0 10px">'
-      + '<b>别一次全招。</b>一次调用 $0.15~$8.20，十个人问一遍要几十美元。让 CEO 判断该问谁。</p>'
-      + '<div class="people">'
-      + s.not_hired.map(r => '<div class="p"><div class="ph"><b>'+esc(r.name)+'</b>'
-        + '<span class="tag">'+esc(r.layer)+'</span></div>'
-        + '<div class="po">'+esc(r.one)+'</div>'
-        + '<button class="btn sm" data-hire="'+esc(r.name)+'" '+bdis()+'>招进来</button></div>').join("")
-      + '</div></div>';
-  }
-  return h;
-}
-
-function vChat(){
-  const s = S;
-  let h = '<h2 class="vh">群聊</h2><p class="vs">'
-    + '所有角色和你共处的地方。<b>每个人开口前都会先看这里</b>，所以他们看得见彼此说了什么。只追加，不改写。</p>'
-    + '<div class="card hi"><div class="fld"><label>在群里说一句（所有人下次开口前都会看到）</label>'
-    + '<textarea id="fSay" placeholder="比如：我在想要不要把这个卖给别人"></textarea></div>'
-    + '<button class="btn pri" id="bSay" '+bdis()+'>说</button></div>';
-  h += '<div class="card"><h3>最近 '+s.chat.length+' 条（新的在上）</h3>';
-  h += s.chat.length ? s.chat.slice().reverse().map(m => {
-      const who = m.who, cls = (who==="你"||who.startsWith("你 "))?"me"
-                : who==="系统"?"sys" : who.includes("CEO")?"ceo":"";
-      return '<div class="msg '+cls+'"><div class="mh"><b>'+esc(who)+'</b>'
-        + '<time>'+esc(m.time)+'</time></div><div class="mb">'+esc(m.body)+'</div></div>';
-    }).join("") : '<p class="empty">还没有人说话</p>';
-  return h + '</div>';
-}
-
-function vWork(){
-  const s = S;
-  let h = '<h2 class="vh">派活</h2><p class="vs">'
-    + '真干活是：派活 → 他自己去搜去做 → 交一个文件 → CEO 验收行不行。<b>产物不在就是没交。</b></p>'
-    + '<div class="card hi"><div class="row">'
-    + '<div class="bwrap"><button class="btn pri" data-run="派单" '+bdis()+'>执行总监拆单派活</button>'
-    + '<small>把 CEO 的决策拆成每个人具体的活</small></div>'
-    + '<div class="bwrap"><button class="btn" data-run="排班" '+bdis()+'>定今天每个人做什么</button>'
-    + '<small>具体到今天</small></div>'
-    + '<div class="bwrap"><button class="btn warn" data-run="验收" '+bdis()+'>CEO 逐份验收</button>'
-    + '<small>打回的要写清怎么改</small></div>'
-    + '</div></div>';
-
-  h += '<div class="card"><h3>台账 · 谁手上有什么活</h3>';
-  if(s.tasks.length){
-    h += '<table><thead><tr><th>#</th><th>派给谁</th><th>状态</th><th>干什么</th><th>交付物</th></tr></thead><tbody>'
-      + s.tasks.slice().reverse().map(t => {
-        const cls = t.state==="干完了"?"bok" : t.state==="没交东西"?"bno":"brun";
-        return '<tr><td class="num">#'+esc(t.id)+'</td><td>'+esc(t.who)+'</td>'
-          + '<td><span class="badge '+cls+'">'+esc(t.state)+'</span></td>'
-          + '<td class="dim">'+esc(t.what.slice(0,70))+'</td>'
-          + '<td class="dim" style="font-size:11.5px">'+esc(t.deliver)+'</td></tr>';
-      }).join("") + '</tbody></table>';
-  }else h += '<p class="empty">还没派过活</p>';
-  h += '</div>';
-
-  if(s.todo.length){
-    const open = s.todo.filter(t=>!t.done);
-    h += '<div class="card"><h3>项目任务清单 · 还剩 '+open.length+' 条</h3>'
-      + '<p class="dim" style="font-size:12.5px;margin:0 0 10px">'
-      + '第9步「自动开做」照着这个清单一条条做。'
-      + '<b style="color:var(--warn)">标黄的那些 AI 干不了，只有你能干。</b></p>'
-      + '<table><tbody>'
-      + s.todo.slice(0,40).map(t =>
-          '<tr><td style="width:26px">'+(t.done?'<span style="color:var(--ok)">✓</span>':'○')+'</td>'
-          + '<td class="'+(t.done?"dim":"")+'" '
-          + (t.gated&&!t.done?'style="color:var(--warn)"':'')+'>'+esc(t.text.slice(0,120))+'</td></tr>'
-        ).join("")
-      + '</tbody></table>'
-      + (s.todo.length>40?'<p class="dim" style="font-size:12px;margin-top:8px">…还有 '
-         +(s.todo.length-40)+' 条，完整的在 docs/07-任务清单.md</p>':'')
-      + '</div>';
-  }
-  return h;
-}
-
-function vExpert(){
-  let h = '<h2 class="vh">外部专家</h2><p class="vs">'
-    + '找真人的判断，不是让 AI 编。<b>这是这套东西跟别的工具最不一样的地方之一。</b></p>'
-    + '<div class="card hi"><h3>按顺序来，一步一步</h3><div class="row">'
-    + '<div class="bwrap"><button class="btn pri" data-run="专家团" '+bdis()+'>1 · CEO 先定专家团</button>'
-    + '<small>缺哪三块判断、要什么样的人、明确不要什么</small></div>'
-    + '<div class="bwrap"><button class="btn" id="bIndustry" '+bdis()+'>2 · 照单去找真人</button>'
-    + '<small>一人一份落盘，带出处</small></div>'
-    + '<div class="bwrap"><button class="btn" data-run="蒸馏" '+bdis()+'>3 · 蒸馏成能问的智能体</button>'
-    + '<small>把够格的真专家做成能单独提问的</small></div>'
-    + '<div class="bwrap"><button class="btn" id="bPanel" '+bdis()+'>4 · 让他们开会</button>'
-    + '<small>依次发言，后面的能反驳前面的</small></div>'
-    + '</div></div>';
-  h += '<div class="card"><h3>专家名单的配比是写死的</h3>'
-    + '<table><thead><tr><th></th><th>至少几位</th><th>给什么</th></tr></thead><tbody>'
-    + '<tr><td><b>A 体系</b>（写书的、国家标准、行业规范）</td>'
-    + '<td style="color:var(--warn)"><b>3，不许缺</b></td>'
-    + '<td class="dim">知识骨架：这行由哪些环节构成、标准做法是什么</td></tr>'
-    + '<tr><td>B 操盘（有可核对战绩的）</td><td>3</td><td class="dim">什么条件下会失效</td></tr>'
-    + '<tr><td>C 标杆（乔布斯这类）</td><td>0–2</td><td class="dim">判断范式（别问他你这行的细节）</td></tr>'
-    + '<tr><td>失败方</td><td>1</td><td class="dim">怎么死的</td></tr>'
-    + '</tbody></table>'
-    + '<div class="note"><b>为什么 A 类不许缺：</b>只按"有战绩"去找会找回一堆网红，'
-    + '有故事没体系，而且成功高度依赖那个年代的红利，拿到手没法用。<br>'
-    + '<b>一条诚实红线：</b>它读不到那些书的全文，只有目录、摘要、书评、演讲。'
-    + '所以每位都必须标明「我掌握到什么程度」——顺着目录编内容，是这件事最像模像样的一种编造。</div>';
-  return h + '</div>';
-}
-
-function vApi(){
-  const s = S;
-  let h = '<h2 class="vh">接口 · 谁用谁家的 AI</h2><p class="vs">'
-    + '<b>每个员工都是独立的。</b>他有自己的会话、自己的工作目录、自己的接口——'
-    + '换脑子只影响他一个人。</p>';
-
-  h += '<div class="note"><b>判断力省不得，体力活可以省。</b><br>'
-    + 'CEO 裁决、风控反证、战略、行研 → <b>留官方</b>，判断错了整个方向就错了。<br>'
-    + '客服、竞品巡查、内容初稿、数据整理 → <b>可以换便宜的</b>，干得糙一点验收那关能兜住。</div>';
-
-  if(Object.keys(s.off_providers).length){
-    h += '<div class="note"><b>账会不准，这个躲不掉。</b>'
-      + '走别家接口时，账单里那几笔的美元数是按 <b>Anthropic 价目表</b>折算的，'
-      + '不是你真付的钱——它不知道别家收多少。真实花费去那家后台看。</div>';
-  }
-
-  h += '<div class="card"><h3>可以接的（表里只放查证过的）</h3>'
-    + '<table><thead><tr><th>代号</th><th>是什么</th><th>模型</th><th>查证日期</th></tr></thead><tbody>'
-    + s.providers.map(p => '<tr><td><code style="color:var(--warn)">'+esc(p.code)+'</code></td>'
-      + '<td>'+esc(p.name)+'</td><td class="dim">'+esc(p.big||"—")+'</td>'
-      + '<td class="num">'+esc(p.verified||"—")+'</td></tr>').join("")
-    + '</tbody></table>'
-    + '<p class="dim" style="font-size:12.5px;margin-top:10px">'
-    + '凭印象加一家进来，你照着配一次配不通，这个功能就废了。'
-    + '要接表上没有的，看 <code>安装与落地.md</code> 第三节。</p></div>';
-
-  if(!s.roles.length){
-    return h + '<div class="card"><p class="empty">还一个员工都没招。先去「👥 组织」招几个。</p></div>';
-  }
-
-  const others = s.providers.filter(p => p.url);
-  h += '<div class="card"><h3>每个员工现在用谁家的</h3>'
-    + '<div class="fld" style="max-width:520px"><label>钥匙（API Key）'
-    + '——只在切到非官方时才需要，存一份大家共用，不进版本库</label>'
-    + '<input id="fKey" type="password" placeholder="sk-…（已经存过就不用再填）"></div>'
-    + '<table><thead><tr><th>员工</th><th>层</th><th>现在用</th><th>换成</th><th></th></tr></thead><tbody>'
-    + s.roles.map(r =>
-        '<tr><td><b>'+esc(r.name)+'</b></td><td class="dim">'+esc(r.layer)+'</td>'
-        + '<td>'+(r.switched?'<span class="tag pv">'+esc(r.provider)+'</span>'
-                            :'<span class="dim">官方</span>')+'</td>'
-        + '<td><select data-sw="'+esc(r.name)+'" style="width:auto;padding:5px 9px;font-size:12.5px">'
-        + '<option value="">— 选一个 —</option>'
-        + '<option value="官方">换回官方</option>'
-        + others.map(p=>'<option value="'+esc(p.code)+'">'+esc(p.name)+'</option>').join("")
-        + '</select></td>'
-        + '<td><button class="btn sm" data-test="'+esc(r.name)+'" '+bdis()+'>测一下通不通</button></td></tr>'
-      ).join("")
-    + '</tbody></table>'
-    + '<div class="row" style="margin-top:14px">'
-    + '<span class="dim" style="font-size:12.5px">整层一起换：</span>'
-    + others.map(p=>'<button class="btn sm" data-swlayer="'+esc(p.code)+'" '+bdis()+'>'
-        + '执行层 → '+esc(p.name)+'</button>').join("")
-    + '<button class="btn sm ghost" data-swlayer="官方" '+bdis()+'>全部换回官方</button>'
-    + '</div>'
-    + '<p class="dim" style="font-size:12.5px;margin-top:10px">'
-    + '<b>换完先测一个，别一次全信。</b></p></div>';
-  return h;
-}
-
-function vMoney(){
-  const s = S;
-  let h = '<h2 class="vh">钱</h2><p class="vs">'
-    + '这套东西会花钱。<b>看得见才控得住。</b>实测一次调用 $0.15~$8.20，差 50 倍。</p>';
-
-  h += '<div class="card hi"><h3>花钱上限</h3>'
-    + '<div class="row" style="max-width:460px">'
-    + '<input id="fBud" type="number" min="1" step="1" style="flex:1" placeholder="比如 50" value="'
-    + esc(s.budget||"") + '">'
-    + '<button class="btn pri" id="bBud" '+bdis()+'>设上限（美元）</button></div>'
-    + '<p class="dim" style="font-size:12.5px;margin:10px 0 0">'
-    + '现在：'+(s.budget?('上限 $'+esc(s.budget)+'，已经花了 $'+s.spent.toFixed(2))
-                       :'<b style="color:var(--warn)">还没设上限</b>——没上限不给跑无人值守')+'。<br>'
-    + '闸门只拦还没花的，不会把花掉的退回来，所以设在你真能接受的数上。</p></div>';
-
-  if(Object.keys(s.off_providers).length){
-    const w = Object.entries(s.off_providers).map(([k,v])=>k+"（"+v+" 次）").join("、");
-    h += '<div class="note"><b>下面的数字有一部分不作数：</b>'+esc(w)
-      + '走的不是官方接口，美元数是按官方价目表折算的，不是你真付的钱。真实花费去那家后台看。</div>';
-  }
-
-  h += '<div class="card"><h3>钱花在谁身上（共 $'+s.spent.toFixed(2)+' / '+s.cost_rows.length+' 次）</h3>';
-  if(s.by_who.length){
-    const max = s.by_who[0][1];
-    h += '<table><tbody>' + s.by_who.slice(0,12).map(([w,c]) =>
-      '<tr><td>'+esc(w)+'</td><td class="num">$'+c.toFixed(2)+'</td>'
-      + '<td class="bar"><i style="width:'+Math.round(c*100/(max||1))+'%"></i></td></tr>').join("")
-      + '</tbody></table>';
-  }else h += '<p class="empty">还没花钱</p>';
-  h += '<div class="row" style="margin-top:12px">'
-    + '<button class="btn sm" data-run="cost" '+bdis()+'>在下面打一份明细</button></div></div>';
-
-  h += '<div class="card"><h3>最近几笔</h3>';
-  if(s.cost_rows.length){
-    h += '<table><thead><tr><th>时间</th><th>干什么</th><th>花了</th><th>用时</th><th>走谁家</th></tr></thead><tbody>'
-      + s.cost_rows.slice(-25).reverse().map(r =>
-        '<tr><td class="num">'+esc(r.time)+'</td><td>'+esc(r.who)+'</td>'
-        + '<td class="num">$'+r.cost.toFixed(4)+'</td><td class="num">'+esc(r.secs)+'s</td>'
-        + '<td>'+(r.provider!=="官方"?'<span class="tag pv">'+esc(r.provider)+'</span>'
-                                     :'<span class="dim">官方</span>')+'</td></tr>').join("")
-      + '</tbody></table>';
-  }else h += '<p class="empty">还没有记录</p>';
-  return h + '</div>';
-}
-
-function vThink(){
-  return '<h2 class="vh">帮我判断 / 纠错</h2><p class="vs">'
-    + '这两个随时能用，不影响流程。</p>'
-    + '<div class="card"><h3>它给了个东西，我不知道好不好</h3>'
-    + '<p style="margin:0 0 12px">五个镜头互相打架——需求、算术、取舍、分发、死法。'
-    + '<b>矛盾的地方才是真正的决策点。</b></p>'
-    + '<button class="btn pri" data-run="judge" '+bdis()+'>帮我判断</button></div>'
-    + '<div class="card"><h3>感觉哪儿不对</h3>'
-    + '<p style="margin:0 0 12px">先查错在哪一层，再决定怎么改。'
-    + '<b>改错层，越改越糟。</b></p>'
-    + '<button class="btn pri" data-run="correct" '+bdis()+'>帮我纠错</button></div>'
-    + '<div class="card"><h3>别的</h3><div class="row">'
-    + '<div class="bwrap"><button class="btn" data-run="status" '+bdis()+'>看一眼进度</button><small>打在下面</small></div>'
-    + '<div class="bwrap"><button class="btn" data-run="看板" '+bdis()+'>生成静态看板</button>'
-    + '<small>存成 看板.html，可以放网盘用手机看</small></div>'
-    + '<div class="bwrap"><button class="btn danger" id="bClose" '+bdis()+'>结项</button>'
-    + '<small>封存 ＋ 写一份诚实的复盘，教训存进判断档案</small></div>'
-    + '</div></div>'
-    + '<div class="note info"><b>为什么面板上没有「全部清空重来」：</b>'
-    + '那条会把所有东西清掉。这种不可逆的事，值得你专门去终端敲一次 '
-    + '<code>./loop.sh reset</code>，而不是手滑点到。</div>';
-}
-
-// ---------- 小组件 ----------
-function kpi(cls, val, label, bar){
-  return '<div class="k '+cls+'"><b>'+val+'</b><span>'+label+'</span>'+(bar||"")+'</div>';
-}
-function pctv(a,b){ const p = b? Math.round(a*100/b):0;
-  return '<div class="prog"><i style="width:'+p+'%"></i></div>'; }
-function moneyText(){ return S.budget ? S.spent.toFixed(2)+" / "+S.budget
-                                      : S.spent.toFixed(2)+"（没设上限）"; }
-function budHot(){ return S.budget && S.spent >= S.budget*0.8; }
-function budBar(){ if(!S.budget) return "";
-  const p = Math.min(Math.round(S.spent*100/parseFloat(S.budget)),100);
-  return '<div class="prog '+(budHot()?"hot":"")+'"><i style="width:'+p+'%"></i></div>'; }
-
-// ---------- 画 ----------
-//
-// 整块 HTML 换掉是最省事的画法，但有个代价：
-// 你正在群聊里打字，5 秒一次的自动刷新会把打了一半的字连光标一起抹掉。
-// 所以画之前把焦点那个框和滚动位置存下来，画完放回去。
-function draw(){
-  if(!S) return;
-  const a = document.activeElement;
-  const keep = (a && a.id && (a.tagName === "INPUT" || a.tagName === "TEXTAREA"))
-    ? {id: a.id, v: a.value, s: a.selectionStart, e: a.selectionEnd} : null;
-  const scroll = $("#view").scrollTop;
-
-  $("#idea").textContent = S.idea || "还没说想做什么";
-  const pb = $("#pBud");
-  pb.textContent = "$" + moneyText();
-  pb.className = "pill" + (budHot() ? " hot" : "");
-  drawSide();
-  const v = $("#view");
-  v.innerHTML = VIEW === "flow"   ? vFlow()
-              : VIEW === "team"   ? vTeam()
-              : VIEW === "chat"   ? vChat()
-              : VIEW === "work"   ? vWork()
-              : VIEW === "expert" ? vExpert()
-              : VIEW === "api"    ? vApi()
-              : VIEW === "money"  ? vMoney()
-              : VIEW === "think"  ? vThink()
-              : VIEW.startsWith("step:") ? vStep(VIEW.slice(5))
-              : vFlow();
-  wire();
-}
-
-function wire(){
-  const v = $("#view");
-  v.querySelectorAll("[data-run]").forEach(b =>
-    b.onclick = () => run(b.dataset.run, []));
-  v.querySelectorAll("[data-hire]").forEach(b =>
-    b.onclick = () => run("hire", [b.dataset.hire]));
-  v.querySelectorAll("[data-arch]").forEach(b =>
-    b.onclick = () => { if(confirm("把「"+b.dataset.arch+"」封存起来？（不删，随时能起复）"))
-                          run("封存",[b.dataset.arch]); });
-  v.querySelectorAll("[data-unarch]").forEach(b =>
-    b.onclick = () => run("起复", [b.dataset.unarch]));
-  v.querySelectorAll("[data-ask]").forEach(b =>
-    b.onclick = () => { const q = prompt("问「"+b.dataset.ask+"」什么？");
-                        if(q && q.trim()) run("ask", [b.dataset.ask, q.trim()]); });
-  v.querySelectorAll("[data-assign]").forEach(b =>
-    b.onclick = () => { const t = prompt("派给「"+b.dataset.assign+"」什么活？说清楚要什么产出。");
-                        if(t && t.trim()) run("派活", [b.dataset.assign, t.trim()]); });
-  v.querySelectorAll("[data-test]").forEach(b =>
-    b.onclick = () => run("接口", ["测", b.dataset.test]));
-
-  v.querySelectorAll("[data-sw]").forEach(sel =>
-    sel.onchange = () => {
-      const code = sel.value; if(!code) return;
-      const name = sel.dataset.sw;
-      const key = ($("#fKey")||{}).value || "";
-      const args = ["接口", name, code];
-      if(code !== "官方" && key.trim()) args.push(key.trim());
-      run(args[0], args.slice(1));
-      sel.value = "";
-    });
-  v.querySelectorAll("[data-swlayer]").forEach(b =>
-    b.onclick = () => {
-      const code = b.dataset.swlayer;
-      const who = code === "官方" ? "全部" : "执行层";
-      if(!confirm("把「"+who+"」全部换成 "+code+"？")) return;
-      const key = ($("#fKey")||{}).value || "";
-      const args = [who, code];
-      if(code !== "官方" && key.trim()) args.push(key.trim());
-      run("接口", args);
-    });
-
-  const on = (id, fn) => { const el = $(id); if(el) el.onclick = fn; };
-  on("#bStart", () => { const t = ($("#fIdea").value||"").trim();
-    if(!t) return toast("先写一句你想做什么", true); run("start",[t]); });
-  on("#bSay", () => { const t = ($("#fSay").value||"").trim();
-    if(!t) return toast("先写点什么", true); run("say",[t]); $("#fSay").value=""; });
-  on("#bBud", () => { const t = ($("#fBud").value||"").trim();
-    if(!t) return toast("填个数", true); run("budget",[t]); });
-  on("#bCouncil", () => { const t = prompt("会诊什么议题？");
-    if(t && t.trim()) run("会诊",[t.trim()]); });
-  on("#bIndustry", () => { const t = prompt("让行业专家去查什么议题？");
-    if(t && t.trim()) run("行业报告",[t.trim()]); });
-  on("#bPanel", () => { const t = prompt("让专家们讨论什么议题？");
-    if(t && t.trim()) run("专家群",[t.trim()]); });
-  on("#bClose", () => { if(confirm("结项？会封存现在的东西并写一份复盘。")) run("close",[]); });
-}
-
-async function refresh(){
-  try{
-    const d = await api("/api/state");
-    S = d; draw();
-  }catch(e){
-    $("#view").innerHTML = '<div class="note"><b>连不上面板服务。</b>'
-      + '可能是你把终端里那个窗口关了。回终端再跑一次 <code>./loop.sh 面板</code>。</div>';
+async function tickLog(){
+  if (!busy) return;
+  const j = await api("/api/job?from=" + logFrom + "&token=" + TOKEN);
+  if (j && j.text){
+    const box = $("#log");
+    if (logFrom === 0) box.textContent = "";
+    box.textContent += j.text;
+    logFrom = j.total;
+    box.scrollTop = box.scrollHeight;
   }
 }
 
-refresh();
-setInterval(() => { if(!busy()) refresh(); }, 5000);
+tick(); drawAsk();
+setInterval(tick, 1800);
+setInterval(tickLog, 700);
 </script>
 </body></html>

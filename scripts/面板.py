@@ -48,20 +48,53 @@ PAGE = os.path.join(HERE, "面板.html")
 ALLOWED = {
     # 主流程
     "start":      1, "go": 0, "back": 0, "auto": 0,
+    # 【最要紧的一条】答题。系统出一道选择题，你回一个 A——
+    # 这是老板每天做得最多的动作，以前面板不认识它，只能找 AI 转手敲命令。
+    "答":         1, "听": 1,
+    # 蓝图这条线：画→改→定了
+    "蓝图":       0, "改": 1, "定了": 0,
     # 看和想
     "status":     0, "explain": 0, "judge": 0, "correct": 0, "today": 0,
-    "cost":       0, "roles": 0, "看板": 0,
+    "cost":       0, "roles": 0, "看板": 0, "日报": 0, "台账": 0,
     # CEO 和组织
     "ceo":        0, "hire": -1, "say": 1, "ask": 2, "会诊": 1,
     # 派活
-    "派单":       0, "排班": 0, "派活": 2, "验收": 0, "台账": 0,
+    "派单":       0, "排班": 0, "派活": 2, "验收": 0,
     # 专家
     "专家团":     0, "行业报告": 1, "蒸馏": 0, "专家群": 1,
-    "封存":       1, "起复": 1,
+    "封存":       1, "起复": 1, "论证": 0,
+    # 想清楚这一路
+    "照镜子":     0, "启蒙": 0, "审美": 0, "手册": 0,
+    # 试金石：两个脑子对跑，先量噪声底
+    "试金石":     1,
     # 钱和接口
-    "budget":     1, "接口": -1,
-    # 结项
-    "close":      0,
+    "budget":     1, "接口": -1, "记账": 3, "止损": 1,
+    # 夜班这一路
+    "想法":       1, "夜班": 1, "战报": 0, "砍": 1, "留": 1,
+}
+
+# ---------------------------------------------------------------
+# 故意【不在】名单里的，一条条都有理由：
+#
+#   reset  —— 清掉所有东西。不可逆的事值得你专门去终端敲一次，不是手滑点到
+#   上线   —— 对外发布 ＝ 红线，永不下放
+#   close  —— 结项，一个项目的句号，同上
+#   help   —— 界面本身就是 help
+#
+# 加命令的时候先想一遍：这条会不会花生意的钱 / 对外发东西 / 不可逆？
+# 三个里占一个，就不许上面板。
+# ---------------------------------------------------------------
+
+# 花钱的命令，界面上要把估价印在按钮上（第 8 条：钱永远可见）。
+# 数字是 [推断]，按 2026-08-19 实测的 token 量推的，真数以 ./loop.sh cost 为准。
+COST_HINT = {
+    "start": "~$0.1–0.4", "go": "~$0.1–0.5", "听": "~$0.1–0.4",
+    "答": "答完最后一题会重跑一轮 ~$0.1–0.4",
+    "蓝图": "~$0.2–0.5", "改": "~$0.2–0.5",
+    "试金石": "~$0.6–1.2（三条腿）",
+    "论证": "~$3–8（十个专家，四个要联网）",
+    "auto": "看预算闸门，撞线自动停",
+    "夜班": "看预算闸门，撞线自动停",
 }
 
 # ---------------------------------------------------------------
@@ -140,6 +173,58 @@ ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 def clean(s):
     return ANSI.sub("", s)
+
+def ask_now():
+    """现在轮到答第几题、题面是什么、有哪几个选项。
+
+    全部走 lib.sh，面板不自己解析文档——这条很重要：
+    命令行和界面必须是同一套读法，否则两边会对同一份文档给出不同的答案。
+    """
+    def sh(script):
+        try:
+            r = subprocess.run(["bash", "-c",
+                                'set -euo pipefail; ROOT=%s; . "$ROOT/scripts/lib.sh"; %s'
+                                % (json.dumps(ROOT), script)],
+                               cwd=ROOT, capture_output=True, text=True, timeout=10)
+            return r.stdout.strip() if r.returncode == 0 else ""
+        except Exception:
+            return ""
+
+    total = sh("listen_q_count") or "0"
+    try:
+        total = int(total)
+    except ValueError:
+        total = 0
+    if total <= 0:
+        return {"有题": False}
+
+    done = sh("listen_answered") or "0"
+    try:
+        done = int(done)
+    except ValueError:
+        done = 0
+    idx = done + 1
+    if idx > total:
+        return {"有题": False, "已答完": True, "共": total}
+
+    raw = sh('listen_q_nth %d' % idx)
+    lines = [ln.rstrip() for ln in raw.splitlines()]
+
+    # 题面 = 「### 问题 N：____」那一行去掉前缀；选项 = 「- **A** ____」那些行
+    title, opts = "", []
+    for ln in lines:
+        m = re.match(r"^###\s*问题\s*\d+\s*[：:]\s*(.*)$", ln)
+        if m and not title:
+            title = m.group(1).strip()
+            continue
+        m = re.match(r"^\s*-\s*\*\*([A-Z])\*\*\s*(.*)$", ln)
+        if m:
+            opts.append({"字母": m.group(1), "说的是": m.group(2).strip()})
+
+    return {"有题": True, "第几题": idx, "共": total,
+            "轮次": sh("listen_round") or "1",
+            "题面": title, "选项": opts, "原文": raw}
+
 
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -220,6 +305,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             s = JOB.snapshot(frm)
             s["text"] = clean(s["text"])
             return self._send(200, s)
+
+        if p == "/api/ask":
+            # 现在轮到你答哪一道题。只读，不花钱。
+            #
+            # 解析不自己写——lib.sh 里那三个函数(listen_q_count / listen_q_nth /
+            # listen_answered)就是干这件事的，命令行和面板必须用同一套，
+            # 不然哪天题目格式变了，两边会给出不同的答案，而且没人发现。
+            if not self._auth():
+                return
+            return self._send(200, ask_now())
 
         if p == "/api/doc":
             if not self._auth():

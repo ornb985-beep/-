@@ -233,6 +233,13 @@ if [ -f scripts/test-翻译表同步.sh ]; then
   run "信号翻译表同步（听懂抄的那份 vs 档案原件）" bash scripts/test-翻译表同步.sh
 fi
 
+# 面板：那个能点的界面。
+# 最坏的失败方式不是打不开，是【点了、屏幕说好了、.loop/ 里什么都没变】，
+# 或者反过来——一个不该让网页碰的命令被放进去跑了。
+if [ -f scripts/test-面板.sh ]; then
+  run "面板（白名单真挡住/点了真发生/题真从 lib.sh 读）" bash scripts/test-面板.sh
+fi
+
 # ---------------- 已知失败区（撞到的真 bug，先记录、不修） ----------------
 if [ -d scripts/known-fail ]; then
   for kf in scripts/known-fail/test-*.sh; do
