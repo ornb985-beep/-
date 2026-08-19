@@ -213,6 +213,26 @@ if [ -f scripts/test-夜班.sh ]; then
   run "夜班（赛马轮转/停下不再捞/台账落盘/地盘隔离）" bash scripts/test-夜班.sh
 fi
 
+# 预算闸门留痕（验证的规矩 第 8 条）。
+# 出处：执行 AI 自己把上限从 $2 提到 $4，跑完才如实报——
+# 能自己抬闸的闸门不是闸门。这里不加审批，只查每次改动有没有真落一行痕迹。
+if [ -f scripts/test-闸门留痕.sh ]; then
+  run "预算闸门留痕（谁抬过闸，事后查得到）" bash scripts/test-闸门留痕.sh
+fi
+
+# 读者名单：反方不许读老板的信念库。
+# 反方拿着老板的信念去反驳老板，等于没有反方——这条一破，核心一整个白做。
+# 在这条测试之前，那句话只是文档里的一行字，没有任何东西执行它。
+if [ -f scripts/test-读者名单.sh ]; then
+  run "读者名单（反方不许读老板的信念库）" bash scripts/test-读者名单.sh
+fi
+
+# 信号翻译表同步：听懂.md 里那张表是从 人性档案.md 抄的（第1步不许读 references/）。
+# 抄 = 同一份内容两个真身。档案改了、听懂不跟着改，没人会发现。
+if [ -f scripts/test-翻译表同步.sh ]; then
+  run "信号翻译表同步（听懂抄的那份 vs 档案原件）" bash scripts/test-翻译表同步.sh
+fi
+
 # ---------------- 已知失败区（撞到的真 bug，先记录、不修） ----------------
 if [ -d scripts/known-fail ]; then
   for kf in scripts/known-fail/test-*.sh; do

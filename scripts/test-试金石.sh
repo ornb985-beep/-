@@ -103,6 +103,30 @@ printf '%s' "$out" | grep -q "全票一致——这是警报" \
 printf '%s' "$out" | grep -q "全票通过应该触发警报" \
   && pass "警报里带着交接包那句原话" || fail "警报里少了交接包那句原话"
 
+# ---------- 五、比对工具自己崩了,不许长得像通过(第 2 条) ----------
+#
+# 这一节补的是一个真漏:旧代码 `out="$(python3 对分歧.py …)" || true`
+# 把 0/1/2 三个退出码全丢了。对分歧.py 特意用 exit 2 表示「解析不了」,
+# 被 || true 静音之后,全票警报的 grep 匹配不上、照样打印「分歧就是信息」、
+# 退出码 0——【比对失败长得跟比对成功一模一样】。
+# 注入点在被测代码上:把沙盘里的 对分歧.py 换成一个必崩的假货。
+cp "$SB/scripts/对分歧.py" "$SB/scripts/对分歧.py.bak"
+printf '#!/usr/bin/env python3\nimport sys\nsys.stderr.write("解析不了\\n")\nsys.exit(2)\n' \
+  > "$SB/scripts/对分歧.py"
+
+out="$(run 试金石 "随便一句" 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && pass "比对工具崩了,命令非零退出(没当成通过)" \
+                || fail "比对工具崩了却退出 0——这就是假绿(rc=$rc)"
+printf '%s' "$out" | grep -q "分歧没数成" \
+  && pass "崩了的时候明说「没数成」" || fail "崩了却没说没数成"
+printf '%s' "$out" | grep -q "不算数" \
+  && pass "崩了的时候明说这一跑不算数" || fail "崩了却没说这一跑不算数"
+printf '%s' "$out" | grep -q "分歧就是信息" \
+  && fail "崩了还打印了让人放心的那句「分歧就是信息」" \
+  || pass "崩了就不再打印任何让人放心的话"
+
+mv "$SB/scripts/对分歧.py.bak" "$SB/scripts/对分歧.py"
+
 echo
 if [ "$FAILED" = 0 ]; then echo "试金石自测:全部通过"; else echo "试金石自测:有失败项"; fi
 exit "$FAILED"

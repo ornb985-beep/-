@@ -594,8 +594,22 @@ except Exception:
   # 分歧交给对分歧.py 数,它的三个检查逻辑这儿一个不碰
   title "试金石 · 数分歧"
   rule
-  out="$(python3 "$ROOT/scripts/对分歧.py" "$dir/$ts-pro.log" "$dir/$ts-flash.log")" || true
+  # 第 2 条:跳过不等于通过。对分歧.py 特意定了退出码
+  # (0 干净 / 1 有漏判 / 2 解析不了),旧代码一句 `|| true` 把三个全丢了——
+  # 于是「比对崩了」和「比对通过」长得一模一样:警报的 grep 匹配不上、
+  # 照样打印「分歧就是信息」、退出码 0。接住它。
+  local drc=0
+  out="$(python3 "$ROOT/scripts/对分歧.py" "$dir/$ts-pro.log" "$dir/$ts-flash.log")" || drc=$?
   printf '%s\n' "$out"
+
+  if [ "$drc" -ge 2 ]; then
+    rule
+    warn "分歧没数成(对分歧.py 退出码 $drc:解析不了)。"
+    say  "  这一跑【不算数】——没数出分歧,不等于没有分歧。"
+    say  "  两份原始产出留着,自己看:$dir/$ts-pro.log 和 $dir/$ts-flash.log"
+    rule
+    return 1
+  fi
 
   # 全票 = 警报,不是通过。判据:判级不同 0 对,且两边都没有独有句
   if printf '%s' "$out" | grep -q "不同 0 对" \
@@ -612,6 +626,11 @@ except Exception:
   say ""
   say "分歧就是信息:吵起来的地方是模型差异,别动规则;两边一起错的地方才轮到规则(验证的规矩第 7 条)。"
   say "两份原始产出:$dir/$ts-pro.log 和 $dir/$ts-flash.log"
+  if [ "$drc" -eq 1 ]; then
+    say ""
+    warn "有句子被漏判(见上面的清单)。漏判是个真发现,所以这条命令退出码非 0。"
+    return 1
+  fi
 }
 
 cmd_status() {
@@ -1215,8 +1234,23 @@ cmd_budget() {
     return 0
   fi
   case "$v" in ''|*[!0-9.]*) die "预算要写数字，比如 ./loop.sh budget 50" ;; esac
+
+  # 第 8 条：闸门数值只有老板能定。这里不加审批，只留痕——
+  # 因为「能自己抬闸的闸门不是闸门」，而留痕之后你一眼就能看见谁抬过。
+  # 出处：2026-08-18 执行 AI 自己把 $2 提到 $4，跑完才如实报。
+  local before; before="$(budget_get)"
+  local trail="$STATE_DIR/闸门记录.tsv"
+  mkdir -p "$STATE_DIR"
+  [ -f "$trail" ] || printf '时间\t从\t到\t当时已花\n' > "$trail"
+  printf '%s\t%s\t%s\t%s\n' \
+    "$(date '+%Y-%m-%d %H:%M')" "${before:-没设过}" "$v" "$(cost_total)" >> "$trail"
+
   state_set budget "$v"
   ok "预算上限设成 \$$v（已经花了 \$$(cost_total)）"
+  if [ -n "$before" ] && [ "$before" != "$v" ]; then
+    say "${C_DIM}闸门从 \$$before 改成了 \$$v，记在 .loop/闸门记录.tsv 里了。${C_OFF}"
+    say "${C_DIM}这个数只有你能定——AI 装不下就该停下来问你，不许自己调门过车。${C_OFF}"
+  fi
 }
 
 # 无人值守：自己一直往下跑，撞到闸门/预算/卡点就停。
