@@ -519,10 +519,13 @@ cmd_listen_once() {
 # 而且那轮里两个模型唯一全票一致判轻的那句,恰好就是判错的那句。
 # 所以:分歧是信息,全票是警报。「全票通过应该触发警报,不是让人放心。」
 #
-# 三条硬规矩(2026-08-18 定死,不许扩):
+# 四条硬规矩(1-3 于 2026-08-18 定死,4 于 08-19 补,不许扩):
 #   1. 每一跑【实际用了哪个模型】从调用日志验,不读配置——配置写的不等于真用的
 #   2. 分歧为 0 时显示明显警告,不许显示绿色的通过
 #   3. 调用前预算闸门硬查,不许跑一半才发现没钱
+#   4. 先量噪声底(同一个模型跑两次),换脑子的分歧不超过它自己抖动时,
+#      这一跑不许当「换脑子有用」的证据。所以是【三条腿,三次调用】——
+#      比原来贵五成,买的是「那个数到底算不算数」
 cmd_touchstone() {
   local text="${1:-}"
   [ -n "$text" ] || die '用法:./loop.sh 试金石 "一段话"　(两个模型各拆一遍,分歧数出来)'
@@ -550,13 +553,23 @@ cmd_touchstone() {
   local ts; ts="$(date +%Y%m%d-%H%M%S)"
   local url; url="$(provider_field deepseek 3)"
 
+  # 三条腿,不是两条。第三条(pro 再跑一次)是【噪声底】——
+  # 同一个模型、同一段话、跑两次,它自己跟自己差多少。
+  # 没有这个底,两个模型之间的分歧数说明不了任何事:那些差异
+  # 可能压根不是「换脑子」带来的,只是同一个脑子自己在抖。
+  # 出处:2026-08-18,flash 对「每天一百多款」上午判 ★★、下午判 ★★★——
+  # 同一个模型、同一句话,自己改了自己的判级。
   local leg model out rc logf actual
-  for leg in pro flash; do
+  for leg in pro pro2 flash; do
     case "$leg" in
-      pro)   model="$(provider_field deepseek 4)" ;;
-      flash) model="$(provider_field deepseek-flash 4)" ;;
+      pro|pro2) model="$(provider_field deepseek 4)" ;;
+      flash)    model="$(provider_field deepseek-flash 4)" ;;
     esac
-    title "试金石 · $model"
+    case "$leg" in
+      pro2) title "试金石 · $model（第二次，量它自己抖多少）" ;;
+      *)    : ;;
+    esac
+    [ "$leg" != "pro2" ] && title "试金石 · $model"
     rule
     rc=0
     (
@@ -591,25 +604,50 @@ except Exception:
     cp "$logf" "$dir/$ts-$leg.log"
   done
 
-  # 分歧交给对分歧.py 数,它的三个检查逻辑这儿一个不碰
-  title "试金石 · 数分歧"
+  # 分歧交给对分歧.py 数,它的三个检查逻辑这儿一个不碰。
+  # 数两遍:一遍量【它自己抖多少】(pro vs pro2),一遍量【换脑子差多少】(pro vs flash)。
+  #
+  # 为什么必须有第一遍:没有噪声底,第二遍那个数说明不了任何事。
+  # 「两个模型差了 2 句」听起来像证据,可要是同一个模型自己跑两次也差 2 句,
+  # 那这 2 句就跟换不换脑子毫无关系——你花的钱买到的是噪声,不是判断。
+  #
+  # 第 2 条:对分歧.py 的退出码(0 干净 / 1 有漏判 / 2 解析不了)必须接住,
+  # 不许用 `|| true` 静音——那会让「比对崩了」长得跟「比对通过」一模一样。
+  local drc=0 nrc=0 noise_out
+  title "试金石 · 先量它自己抖多少（同一个模型跑两次）"
   rule
-  # 第 2 条:跳过不等于通过。对分歧.py 特意定了退出码
-  # (0 干净 / 1 有漏判 / 2 解析不了),旧代码一句 `|| true` 把三个全丢了——
-  # 于是「比对崩了」和「比对通过」长得一模一样:警报的 grep 匹配不上、
-  # 照样打印「分歧就是信息」、退出码 0。接住它。
-  local drc=0
+  noise_out="$(python3 "$ROOT/scripts/对分歧.py" "$dir/$ts-pro.log" "$dir/$ts-pro2.log")" || nrc=$?
+  printf '%s\n' "$noise_out"
+  if [ "$nrc" -ge 2 ]; then
+    rule; warn "分歧没数成:噪声底那一遍就崩了(对分歧.py 退出码 $nrc)。这一跑【不算数】——量不出底,后面的数没有意义。"
+    say "  三份原始产出留着:$dir/$ts-{pro,pro2,flash}.log"; rule; return 1
+  fi
+
+  title "试金石 · 再量换脑子差多少"
+  rule
   out="$(python3 "$ROOT/scripts/对分歧.py" "$dir/$ts-pro.log" "$dir/$ts-flash.log")" || drc=$?
   printf '%s\n' "$out"
-
   if [ "$drc" -ge 2 ]; then
     rule
     warn "分歧没数成(对分歧.py 退出码 $drc:解析不了)。"
     say  "  这一跑【不算数】——没数出分歧,不等于没有分歧。"
-    say  "  两份原始产出留着,自己看:$dir/$ts-pro.log 和 $dir/$ts-flash.log"
+    say  "  三份原始产出留着,自己看:$dir/$ts-{pro,pro2,flash}.log"
     rule
     return 1
   fi
+
+  # 把两个「不同 N 对」抠出来比。抠不到就当没量到,不许蒙混过去。
+  local noise sig
+  noise="$(printf '%s' "$noise_out" | grep -oE '不同 [0-9]+ 对' | head -1 | grep -oE '[0-9]+' || true)"
+  sig="$(  printf '%s' "$out"       | grep -oE '不同 [0-9]+ 对' | head -1 | grep -oE '[0-9]+' || true)"
+  if [ -z "$noise" ] || [ -z "$sig" ]; then
+    rule; warn "读不出「不同 N 对」这个数,判不了净信号。这一跑不算数。"; rule; return 1
+  fi
+
+  rule
+  title "试金石 · 结论"
+  say "  它自己跟自己差：${C_BOLD}$noise${C_OFF} 句　　换个脑子差：${C_BOLD}$sig${C_OFF} 句"
+  say ""
 
   # 全票 = 警报,不是通过。判据:判级不同 0 对,且两边都没有独有句
   if printf '%s' "$out" | grep -q "不同 0 对" \
@@ -623,9 +661,21 @@ except Exception:
     rule
     return 1
   fi
+
+  if [ "$sig" -le "$noise" ]; then
+    warn "⚠ 换脑子差的（$sig）不比它自己抖的（$noise）多——这一跑【不许当成「换脑子有用」的证据】。"
+    say  "  同一个模型自己跑两次就能差 $noise 句,那两个模型差 $sig 句什么也证明不了。"
+    say  "  实证:2026-08-18,flash 对「每天一百多款」上午判 ★★、下午判 ★★★——"
+    say  "  同一个模型、同一句话,自己改了自己的判级。"
+    say  "  要么多跑几轮把底量稳,要么换一家真正不同的模型再试。"
+    rule
+    return 1
+  fi
+
+  say "${C_BOLD}净信号 $((sig - noise)) 句${C_OFF}：换脑子带来的分歧，超出了它自己抖动的部分。"
   say ""
   say "分歧就是信息:吵起来的地方是模型差异,别动规则;两边一起错的地方才轮到规则(验证的规矩第 7 条)。"
-  say "两份原始产出:$dir/$ts-pro.log 和 $dir/$ts-flash.log"
+  say "三份原始产出:$dir/$ts-{pro,pro2,flash}.log"
   if [ "$drc" -eq 1 ]; then
     say ""
     warn "有句子被漏判(见上面的清单)。漏判是个真发现,所以这条命令退出码非 0。"
@@ -2528,7 +2578,9 @@ cmd_help() {
   ./loop.sh start "你想做什么"   开始（一句话说清就行，不用想得多完整）
   ./loop.sh 答 "1A 2C ..."       回答第1步问你的那几个问题
   ./loop.sh 听 "任何一段话"       单独用：只把一段话拆开听懂，不开项目
-  ./loop.sh 试金石 "任何一段话"    两个模型各拆一遍，分歧数出来；全票一致会报警
+  ./loop.sh 试金石 "任何一段话"    三条腿(同模型跑两次量噪声底 + 换个模型)，
+                                   报「它自己差几句 / 换脑子差几句」；
+                                   净信号不为正、或全票一致，都会报警（各花 3 次调用）
   ./loop.sh go                   继续往下跑
   ./loop.sh status               看进度（终端）
   ./loop.sh 看板                 生成桌面看板：组织图＋群聊＋台账＋账单，双击就开

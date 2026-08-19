@@ -43,6 +43,13 @@ rep="${ANTHROPIC_MODEL:-?}"
 [ -n "${FAKE_LIE:-}" ] && rep="deepseek-v4-pro"
 variant="${ANTHROPIC_MODEL:-?}"
 [ -n "${FAKE_SAME:-}" ] && variant="deepseek-v4-pro"
+# FAKE_NOISY:同一个模型第二次跑就换个答案——模拟「模型自己抖」。
+# 真事:2026-08-18 flash 对同一句话上午判 ★★、下午判 ★★★。
+if [ -n "${FAKE_NOISY:-}" ]; then
+  cnt="$(cat "${NOISE_COUNTER:-/tmp/nc}" 2>/dev/null || echo 0)"
+  cnt=$((cnt+1)); echo "$cnt" > "${NOISE_COUNTER:-/tmp/nc}"
+  [ "$cnt" = 2 ] && variant="第二次就变了"
+fi
 python3 - "$rep" "$variant" <<'PY'
 import json, sys
 rep, variant = sys.argv[1], sys.argv[2]
@@ -126,6 +133,23 @@ printf '%s' "$out" | grep -q "分歧就是信息" \
   || pass "崩了就不再打印任何让人放心的话"
 
 mv "$SB/scripts/对分歧.py.bak" "$SB/scripts/对分歧.py"
+
+# ---------- 六、噪声底：同一个模型自己抖得比换脑子还多，不许算证据 ----------
+#
+# 这一节防的是核心一唯一那份证据的地基：
+# 「两个模型差了 N 句」听起来像证据，可要是同一个模型自己跑两次也差 N 句，
+# 那 N 句跟换不换脑子毫无关系——买到的是噪声，不是判断。
+# 真事：2026-08-18 flash 对「每天一百多款」上午判 ★★、下午判 ★★★。
+NC="$TMP/noise-counter"; rm -f "$NC"
+out="$(FAKE_NOISY=1 NOISE_COUNTER="$NC" run 试金石 "随便一句" 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && pass "自己抖得不比换脑子少时,退出码非 0(不算证据)" \
+                || fail "自己抖得不比换脑子少,却当成通过了(rc=$rc)"
+printf '%s' "$out" | grep -q "它自己跟自己差" \
+  && pass "报告里两个数都给了(自己抖多少 / 换脑子差多少)" || fail "没报出噪声底那个数"
+printf '%s' "$out" | grep -q "不许当成" \
+  && pass "明说了这一跑不许当「换脑子有用」的证据" || fail "没说清这一跑不算证据"
+printf '%s' "$out" | grep -q "净信号" \
+  && fail "自己抖得更多,还打印了「净信号」" || pass "自己抖得更多时,不打印净信号"
 
 echo
 if [ "$FAILED" = 0 ]; then echo "试金石自测:全部通过"; else echo "试金石自测:有失败项"; fi
